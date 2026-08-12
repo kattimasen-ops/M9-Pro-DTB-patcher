@@ -1,4 +1,4 @@
-name: MASTER MODE - RK3326 DTB AI Phandle Patcher
+name: MASTER MODE - RK3326 DTB AI Phandle & Self-Healing
 
 on:
   push:
@@ -26,7 +26,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y device-tree-compiler python3 python3-git
 
-      - name: Execute Phandle-Translating DTS Patcher
+      - name: Execute Self-Healing DTS Patcher & Full OC
         run: |
           python3 - << 'EOF'
           import re
@@ -59,8 +59,36 @@ jobs:
           with open(orig_dts, "r", encoding="utf-8") as f:
               orig_content = f.read()
 
-          print("[*] Bereinige Altlasten (lösche fehlgeschlagene Injections vorheriger Läufe)...")
+          print("[*] AKTIVIERE SELBSTHEILUNG: Bereinige kaputte Duplikate aus alten Skript-Läufen...")
+          # 1. Block-Markierungen entfernen
           content = re.sub(r'\n\t/\* --- START INJECTED M9PRO HARDWARE NODES --- \*/.*?/\* --- END INJECTED M9PRO HARDWARE NODES --- \*/\n', '', content, flags=re.DOTALL)
+
+          # 2. Aggressiver Purge: Zerstörte und doppelte Nodes physisch herausschneiden
+          def purge_node(text, node_name):
+              while True:
+                  match = re.search(r'\n[ \t]*' + re.escape(node_name) + r'(?:@[0-9a-fA-F]+)?\s*\{', text)
+                  if not match: break
+                  start_idx = match.start()
+                  brace_idx = text.find('{', start_idx)
+                  if brace_idx == -1: break
+                  brace_count = 1
+                  end_idx = -1
+                  for i in range(brace_idx + 1, len(text)):
+                      if text[i] == '{': brace_count += 1
+                      elif text[i] == '}': brace_count -= 1
+                      if brace_count == 0:
+                          end_idx = i + 1
+                          if end_idx < len(text) and text[end_idx] == ';': end_idx += 1
+                          break
+                  if end_idx != -1:
+                      text = text[:start_idx] + text[end_idx:]
+                  else: break
+              return text
+
+          # Wir löschen genau die Nodes, die im vorherigen Lauf hängen geblieben sind
+          nodes_to_purge = ["sdio-pwrseq", "vcc-led", "ledvcc-en-gpio", "charge-led-gpio", "wifi-enable-h", "led-vcc", "gpio-leds"]
+          for node in nodes_to_purge:
+              content = purge_node(content, node)
 
           print("[*] Baue dynamisches Phandle-Wörterbuch zur Hardware-Übersetzung auf...")
           def build_phandle_map(dts_content):
@@ -83,7 +111,7 @@ jobs:
               if name in target_map:
                   translation_dict[orig_ph] = target_map[name]
 
-          print(f"[*] {len(translation_dict)} Hardware-Phandles (GPIOs, Clocks, etc.) erfolgreich verknüpft!")
+          print(f"[*] {len(translation_dict)} Hardware-Phandles erfolgreich verknüpft!")
 
           def extract_nodes_by_keywords(text, keywords):
               extracted_blocks = []
@@ -121,14 +149,13 @@ jobs:
               if "battery" in clean_name.lower(): continue
               if clean_name in injected_names: continue
               
-              # Vermeidung von Duplicate Nodes (z.B. sdio-pwrseq)
               if re.search(r'\b' + re.escape(clean_name) + r'(?:@[0-9a-fA-F]+)?\s*\{', content):
                   if "sdio" in clean_name.lower() or "pcie" in clean_name.lower():
                       content = re.sub(r'(' + re.escape(clean_name) + r'[^}]*status\s*=\s*")disabled(";)', r'\1okay\2', content)
                   continue
                   
               injected_names.add(clean_name)
-              print(f"[+] Injiziere Node: {clean_name}")
+              print(f"[+] Injiziere geheilten Node: {clean_name}")
               
               # KI-ÜBERSETZUNG: Ersetze alte M9Pro Phandles durch gültige K36 Phandles
               for orig_ph, targ_ph in translation_dict.items():
@@ -142,26 +169,39 @@ jobs:
                   injections += "\t/* --- END INJECTED M9PRO HARDWARE NODES --- */\n"
                   content = content[:last_brace] + injections + content[last_brace:]
 
-          print("[*] Wende TeacupX Overclocking-Profile an...")
+          print("[*] Wende TeacupX Overclocking-Profile (CPU, GPU, RAM) an...")
           content = re.sub(r'&(?:cpu0_opp_table|gpu_opp_table|dmc_opp_table)\s*\{[^}]*\};\s*', '', content)
           content = re.sub(r'\s*opp-(?:1300000000|1416000000|1512000000|667000000|700000000|800000000|933000000|1056000000)\s*\{[^}]*?\};', '', content)
 
-          cpu_oc = "\n\t\topp-1300000000 { opp-hz = < 0x00 0x4d784000 >; opp-microvolt = < 0x1406f0 >; };"
-          if m := re.search(r'(opp-(?:1200000000|1100000000|1000000000|312000000)\s*\{[^}]*\};)', content): content = content[:m.end()] + cpu_oc + content[m.end():]
+          cpu_oc = """
+          		opp-1300000000 { opp-hz = < 0x00 0x4d784000 >; opp-microvolt = < 0x1406f0 >; };
+          		opp-1416000000 { opp-hz = < 0x00 0x5463b000 >; opp-microvolt = < 0x14fb18 >; };
+          		opp-1512000000 { opp-hz = < 0x00 0x5a1f4000 >; opp-microvolt = < 0x155cc0 >; };"""
+          if m := re.search(r'(opp-(?:1200000000|1100000000|1000000000|312000000)\s*\{[^}]*\};)', content): content = content[:m.end()] + "\n" + cpu_oc + content[m.end():]
+
+          gpu_oc = """
+          		opp-667000000 { opp-hz = < 0x00 0x27c95b00 >; opp-microvolt = < 0x13d620 >; };
+          		opp-700000000 { opp-hz = < 0x00 0x29b92700 >; opp-microvolt = < 0x1406f0 >; };
+          		opp-800000000 { opp-hz = < 0x00 0x2fa0be00 >; opp-microvolt = < 0x14f000 >; };"""
+          if m := re.search(r'(opp-(?:520000000|600000000|400000000|200000000)\s*\{[^}]*\};)', content): content = content[:m.end()] + "\n" + gpu_oc + content[m.end():]
+
+          dmc_oc = """
+          		opp-933000000 { opp-hz = < 0x00 0x379c29c0 >; };
+          		opp-1056000000 { opp-hz = < 0x00 0x3ef14800 >; };"""
+          if m := re.search(r'(opp-(?:786000000|667000000|528000000|333000000)\s*\{[^}]*\};)', content): content = content[:m.end()] + "\n" + dmc_oc + content[m.end():]
 
           with open(merged_dts, "w", encoding="utf-8") as f:
               f.write(content)
 
-          print(f"[*] Kompiliere finale DTB ({final_dtb}) zurück (unterdrücke harmlose Rockchip-Warnungen)...")
-          # PRO-FIX: Warnungen (unique_unit_address / graph_child_address) abschalten für sauberes Log
+          print(f"[*] Kompiliere finale DTB ({final_dtb}) zurück...")
           subprocess.run(["dtc", "-I", "dts", "-O", "dtb", "-f", "-Wno-unique_unit_address", "-Wno-graph_child_address", "-o", final_dtb, merged_dts], check=True)
-          print("[✓] MASTER PATCH ERFOLGREICH! Keine Errors, saubere Phandles.")
+          print("[✓] SELF-HEALING ERFOLGREICH! Alle Duplikate entfernt und sauber neu kompiliert.")
           EOF
 
       - name: Upload Generated DTB Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: master-patched-rk3326-k36-dtb
+          name: healed-rk3326-k36-dtb
           path: rk3326-k36-linux.dtb
           retention-days: 14
 
@@ -172,4 +212,4 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add rk3326-k36-linux.dtb
-          git diff --quiet && git diff --staged --quiet || (git commit -m "chore(master-mode): implement ai phandle translation, fix sdio dupes and cleanup logs [skip ci]" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "fix(dtb): auto-heal duplicate nodes and apply clean injections [skip ci]" && git push)

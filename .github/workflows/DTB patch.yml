@@ -41,7 +41,7 @@ jobs:
           final_dtb = "rk3326-k36-linux.dtb"
 
           if not os.path.exists(original_dtb):
-              print(f"[!] FEHLER: Original-DTB '{original_dtb}' fehlt im Repository!")
+              print(f"[!] FEHLER: Original-DTB '{original_dtb}' fehlt!")
               exit(1)
 
           print(f"[*] Dekompiliere Original-DTB ({original_dtb})...")
@@ -59,14 +59,12 @@ jobs:
           with open(orig_dts, "r", encoding="utf-8") as f:
               orig_content = f.read()
 
-          print("[*] AKTIVIERE SELBSTHEILUNG: Bereinige kaputte Duplikate aus alten Skript-Läufen...")
-          # 1. Block-Markierungen entfernen
+          print("[*] AKTIVIERE SELBSTHEILUNG: Bereinige kaputte Duplikate...")
           content = re.sub(r'\n\t/\* --- START INJECTED M9PRO HARDWARE NODES --- \*/.*?/\* --- END INJECTED M9PRO HARDWARE NODES --- \*/\n', '', content, flags=re.DOTALL)
 
-          # 2. Aggressiver Purge: Zerstörte und doppelte Nodes physisch herausschneiden
           def purge_node(text, node_name):
               while True:
-                  match = re.search(r'\n[ \t]*' + re.escape(node_name) + r'(?:@[0-9a-fA-F]+)?\s*\{', text)
+                  match = re.search(r'\n[ \t]*' + re.escape(node_name) + r'(?:@[a-zA-Z0-9_,+-]+)?\s*\{', text)
                   if not match: break
                   start_idx = match.start()
                   brace_idx = text.find('{', start_idx)
@@ -85,8 +83,7 @@ jobs:
                   else: break
               return text
 
-          # Wir löschen genau die Nodes, die im vorherigen Lauf hängen geblieben sind
-          nodes_to_purge = ["sdio-pwrseq", "vcc-led", "ledvcc-en-gpio", "charge-led-gpio", "wifi-enable-h", "led-vcc", "gpio-leds"]
+          nodes_to_purge = ["sdio-pwrseq", "vcc-led", "ledvcc-en-gpio", "charge-led-gpio", "wifi-enable-h", "led-vcc", "gpio-leds", "led"]
           for node in nodes_to_purge:
               content = purge_node(content, node)
 
@@ -111,34 +108,47 @@ jobs:
               if name in target_map:
                   translation_dict[orig_ph] = target_map[name]
 
-          print(f"[*] {len(translation_dict)} Hardware-Phandles erfolgreich verknüpft!")
+          print(f"[*] {len(translation_dict)} Hardware-Phandles (externe Hardware) erfolgreich verknüpft!")
 
-          def extract_nodes_by_keywords(text, keywords):
+          def extract_root_nodes_by_keywords(text, keywords):
               extracted_blocks = []
-              for i, char in enumerate(text):
-                  if char == '{':
-                      start_decl = text.rfind('\n', 0, i)
-                      if start_decl == -1: start_decl = 0
-                      decl = text[start_decl:i].strip()
-                      
-                      if any(kw.lower() in decl.lower() for kw in keywords) and not decl.startswith('/'):
-                          brace_count = 1
-                          end_idx = -1
-                          for j in range(i + 1, len(text)):
-                              if text[j] == '{': brace_count += 1
-                              elif text[j] == '}': brace_count -= 1
-                              
-                              if brace_count == 0:
-                                  end_idx = j + 1
-                                  if end_idx < len(text) and text[end_idx] == ';': end_idx += 1
-                                  break
-                          
-                          if end_idx != -1:
-                              extracted_blocks.append((decl.split()[0], text[start_decl:end_idx].strip()))
+              # KI FIX: ^ garantiert, dass wir NUR Wurzelknoten extrahieren (keine Unterknoten mehr!)
+              for match in re.finditer(r'^([a-zA-Z0-9_,+-]+)(?:@[a-zA-Z0-9_,+-]+)?\s*\{', text, re.MULTILINE):
+                  decl = match.group(0)
+                  node_name = match.group(1)
+                  start_idx = match.start()
+                  
+                  if any(kw.lower() in decl.lower() for kw in keywords):
+                      brace_count = 1
+                      brace_idx = text.find('{', start_idx)
+                      end_idx = -1
+                      for j in range(brace_idx + 1, len(text)):
+                          if text[j] == '{': brace_count += 1
+                          elif text[j] == '}': brace_count -= 1
+                          if brace_count == 0:
+                              end_idx = j + 1
+                              if end_idx < len(text) and text[end_idx] == ';': end_idx += 1
+                              break
+                      if end_idx != -1:
+                          extracted_blocks.append((node_name, text[start_idx:end_idx].strip()))
               return extracted_blocks
 
           target_keywords = ["rgb", "pwm", "led", "light", "pcie", "pcim", "wlan", "wifi", "sdio", "rk915", "pwrseq"]
-          found_nodes = extract_nodes_by_keywords(orig_content, target_keywords)
+          found_nodes = extract_root_nodes_by_keywords(orig_content, target_keywords)
+
+          print("[*] Generiere kollisionsfreie Phandles für injizierte Knoten...")
+          target_phandles = set()
+          for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', content):
+              target_phandles.add(int(m.group(1), 16))
+          new_ph_counter = max(target_phandles) + 1 if target_phandles else 0x1000
+
+          internal_phandle_map = {}
+          for _, block in found_nodes:
+              for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', block):
+                  old_ph = m.group(1).lower()
+                  if old_ph not in internal_phandle_map:
+                      internal_phandle_map[old_ph] = f"0x{new_ph_counter:x}"
+                      new_ph_counter += 1
 
           injected_names = set()
           injections = "\n\t/* --- START INJECTED M9PRO HARDWARE NODES --- */\n"
@@ -149,17 +159,21 @@ jobs:
               if "battery" in clean_name.lower(): continue
               if clean_name in injected_names: continue
               
-              if re.search(r'\b' + re.escape(clean_name) + r'(?:@[0-9a-fA-F]+)?\s*\{', content):
+              if re.search(r'\n[ \t]*' + re.escape(clean_name) + r'(?:@[a-zA-Z0-9_,+-]+)?\s*\{', content):
                   if "sdio" in clean_name.lower() or "pcie" in clean_name.lower():
                       content = re.sub(r'(' + re.escape(clean_name) + r'[^}]*status\s*=\s*")disabled(";)', r'\1okay\2', content)
                   continue
                   
               injected_names.add(clean_name)
-              print(f"[+] Injiziere geheilten Node: {clean_name}")
+              print(f"[+] Injiziere kollisionsfreien Node: {clean_name}")
               
-              # KI-ÜBERSETZUNG: Ersetze alte M9Pro Phandles durch gültige K36 Phandles
+              # Übersetze externe Verbindungen (K36-Schnittstellen)
               for orig_ph, targ_ph in translation_dict.items():
-                  block = re.sub(r'\b' + orig_ph + r'\b', targ_ph, block)
+                  block = re.sub(r'\b' + orig_ph + r'\b', targ_ph, block, flags=re.IGNORECASE)
+                  
+              # Übersetze interne Verbindungen (Verhindert Absturz durch doppelte IDs)
+              for old_internal, new_internal in internal_phandle_map.items():
+                  block = re.sub(r'\b' + old_internal + r'\b', new_internal, block, flags=re.IGNORECASE)
                   
               injections += "\t" + block.replace("\n", "\n\t") + "\n\n"
 
@@ -195,7 +209,7 @@ jobs:
 
           print(f"[*] Kompiliere finale DTB ({final_dtb}) zurück...")
           subprocess.run(["dtc", "-I", "dts", "-O", "dtb", "-f", "-Wno-unique_unit_address", "-Wno-graph_child_address", "-o", final_dtb, merged_dts], check=True)
-          print("[✓] SELF-HEALING ERFOLGREICH! Alle Duplikate entfernt und sauber neu kompiliert.")
+          print("[✓] SELF-HEALING ERFOLGREICH! Keine Duplikate, keine Phandle-Kollisionen. Master Patch abgeschlossen.")
           EOF
 
       - name: Upload Generated DTB Artifact
@@ -212,4 +226,4 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add rk3326-k36-linux.dtb
-          git diff --quiet && git diff --staged --quiet || (git commit -m "fix(dtb): auto-heal duplicate nodes and apply clean injections [skip ci]" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "fix(dtb): auto-heal phandle collisions and apply clean injections [skip ci]" && git push)

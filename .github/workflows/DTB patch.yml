@@ -13,7 +13,7 @@ permissions:
   contents: write
 
 jobs:
-    patch-and-merge-dtb:
+  patch-and-merge-dtb:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -65,16 +65,14 @@ jobs:
           # 1. Korrigiere und aktualisiere SDIO-Status (Abgleich mit Original)
           orig_sdio_match = re.search(r'(sdio\s*\{[^}]*status\s*=\s*"[^"]+"\s*;?[^}]*\})', orig_content, re.DOTALL)
           if orig_sdio_match:
-              # Übernehme SDIO-Block aus dem Original, falls er im Ziel abweicht oder disabled ist
               content = re.sub(r'sdio\s*\{[^}]*status\s*=\s*"disabled"\s*;?[^}]*\}', orig_sdio_match.group(1), content, flags=re.DOTALL)
           
-          # Generelle Aktivierung von SDIO für WLAN
           content = re.sub(r'(sdio\s*\{[^}]*status\s*=\s*")disabled(";)', r'\1okay\2', content)
 
           # 2. Bereinige fehlerhafte Label-Referenzen im Root
           content = re.sub(r'&(?:cpu0_opp_table|gpu_opp_table|dmc_opp_table)\s*\{[^}]*\};\s*', '', content)
 
-          # 3. Ergänze fehlende Hardware-Module (Analogstick LEDs, WLAN, Bluetooth) falls nicht vorhanden
+          # 3. Ergänze fehlende Hardware-Module (Analogstick LEDs, WLAN, Bluetooth)
           if "led_left_stick" not in content and "gpio-leds" not in content:
               led_node = """
           	/* TeacupX / M9Pro Hardware - Analogstick LEDs */
@@ -125,7 +123,7 @@ jobs:
               if last_brace != -1:
                   content = content[:last_brace] + bt_node + "\n" + content[last_brace:]
 
-          # 4. TeacupX Overclocking-Einträge (CPU, GPU, RAM) einfügen oder aktualisieren
+          # 4. TeacupX Overclocking-Einträge (CPU, GPU, RAM) einfügen
           cpu_oc = """
           		opp-1300000000 {
           			opp-hz = < 0x00 0x4d784000 >;
@@ -180,7 +178,6 @@ jobs:
                   pos = m.end()
                   content = content[:pos] + "\n" + dmc_oc + content[pos:]
 
-          # Speichere die gemergte DTS-Datei
           with open(merged_dts, "w", encoding="utf-8") as f:
               f.write(content)
 

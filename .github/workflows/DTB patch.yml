@@ -44,33 +44,34 @@ jobs:
               raise FileNotFoundError(f"Original-DTB '{original_dtb}' wurde im Repository nicht gefunden!")
 
           print(f"[*] Dekompiliere Original-DTB ({original_dtb})...")
-          subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-o", orig_dts, original_dtb], check=True)
+          subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f", "-o", orig_dts, original_dtb], check=True)
 
-          # Falls die Ziel-DTB existiert, dekompilieren wir sie als Basis für den Abgleich
+          # Falls die Ziel-DTB existiert, erzwingen wir die Dekompilierung trotz Duplikate mit -f
           if os.path.exists(target_dtb):
-              print(f"[*] Dekompiliere bestehende Ziel-DTB ({target_dtb})...")
-              subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-o", target_dts, target_dtb], check=True)
-              with open(target_dts, "r", encoding="utf-8") as f:
-                  content = f.read()
-          else:
-              print(f"[*] Keine Ziel-DTB gefunden, verwende Original als Basis.")
-              with open(orig_dts, "r", encoding="utf-8") as f:
-                  content = f.read()
+              print(f"[*] Dekompiliere bestehende Ziel-DTB ({target_dtb}) mit Force-Modus...")
+              res = subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f", "-o", target_dts, target_dtb])
+              if res.returncode != 0:
+                  print("[!] Ziel-DTB hat kritische Fehler. Verwende stattdessen das Original als saubere Basis.")
+                  subprocess.run(["cp", orig_dts, target_dts], check=True)
+
+          with open(target_dts, "r", encoding="utf-8") as f:
+              content = f.read()
 
           with open(orig_dts, "r", encoding="utf-8") as f:
               orig_content = f.read()
 
           print("[*] Führe Struktur- und Pfadabgleich mit dem Original durch...")
 
-          # 1. Korrigiere und aktualisiere SDIO-Status (Abgleich mit Original)
+          # 1. SDIO Status abgleichen
           orig_sdio_match = re.search(r'(sdio\s*\{[^}]*status\s*=\s*"[^"]+"\s*;?[^}]*\})', orig_content, re.DOTALL)
           if orig_sdio_match:
               content = re.sub(r'sdio\s*\{[^}]*status\s*=\s*"disabled"\s*;?[^}]*\}', orig_sdio_match.group(1), content, flags=re.DOTALL)
           
           content = re.sub(r'(sdio\s*\{[^}]*status\s*=\s*")disabled(";)', r'\1okay\2', content)
 
-          # 2. Bereinige fehlerhafte Label-Referenzen im Root
+          # 2. Bereinige fehlerhafte Label-Referenzen und mögliche Duplikate von OPP-Nodes vor dem Neueinfügen
           content = re.sub(r'&(?:cpu0_opp_table|gpu_opp_table|dmc_opp_table)\s*\{[^}]*\};\s*', '', content)
+          content = re.sub(r'\s*opp-(?:1300000000|1416000000|1512000000|667000000|700000000|800000000|933000000|1056000000)\s*\{[^}]*?\};', '', content)
 
           # 3. Ergänze fehlende Hardware-Module (Analogstick LEDs, WLAN, Bluetooth)
           if "led_left_stick" not in content and "gpio-leds" not in content:
@@ -123,7 +124,7 @@ jobs:
               if last_brace != -1:
                   content = content[:last_brace] + bt_node + "\n" + content[last_brace:]
 
-          # 4. TeacupX Overclocking-Einträge (CPU, GPU, RAM) einfügen
+          # 4. TeacupX Overclocking-Einträge sauber einfügen
           cpu_oc = """
           		opp-1300000000 {
           			opp-hz = < 0x00 0x4d784000 >;
@@ -138,11 +139,10 @@ jobs:
           			opp-microvolt = < 0x155cc0 >;
           		};"""
 
-          if "opp-1300000000" not in content:
-              m = re.search(r'(opp-(?:1200000000|1100000000|1000000000|312000000)\s*\{[^}]*\};)', content)
-              if m:
-                  pos = m.end()
-                  content = content[:pos] + "\n" + cpu_oc + content[pos:]
+          m = re.search(r'(opp-(?:1200000000|1100000000|1000000000|312000000)\s*\{[^}]*\};)', content)
+          if m:
+              pos = m.end()
+              content = content[:pos] + "\n" + cpu_oc + content[pos:]
 
           gpu_oc = """
           		opp-667000000 {
@@ -158,11 +158,10 @@ jobs:
           			opp-microvolt = < 0x14f000 >;
           		};"""
 
-          if "opp-700000000" not in content:
-              m = re.search(r'(opp-(?:520000000|600000000|400000000|200000000)\s*\{[^}]*\};)', content)
-              if m:
-                  pos = m.end()
-                  content = content[:pos] + "\n" + gpu_oc + content[pos:]
+          m = re.search(r'(opp-(?:520000000|600000000|400000000|200000000)\s*\{[^}]*\};)', content)
+          if m:
+              pos = m.end()
+              content = content[:pos] + "\n" + gpu_oc + content[pos:]
 
           dmc_oc = """
           		opp-933000000 {
@@ -172,18 +171,17 @@ jobs:
           			opp-hz = < 0x00 0x3ef14800 >;
           		};"""
 
-          if "opp-1056000000" not in content:
-              m = re.search(r'(opp-786000000\s*\{[^}]*\};|opp-667000000\s*\{[^}]*\};|dmc-opp-table\s*\{)', content)
-              if m:
-                  pos = m.end()
-                  content = content[:pos] + "\n" + dmc_oc + content[pos:]
+          m = re.search(r'(opp-786000000\s*\{[^}]*\};|opp-667000000\s*\{[^}]*\};|dmc-opp-table\s*\{)', content)
+          if m:
+              pos = m.end()
+              content = content[:pos] + "\n" + dmc_oc + content[pos:]
 
           with open(merged_dts, "w", encoding="utf-8") as f:
               f.write(content)
 
           print(f"[*] Kompiliere gemergte DTS zurück nach {final_dtb}...")
           subprocess.run(["dtc", "-I", "dts", "-O", "dtb", "-f", "-o", final_dtb, merged_dts], check=True)
-          print("[✓] DTB erfolgreich abgeglichen, gepatcht und kompiliert!")
+          print("[✓] DTB erfolgreich bereinigt, abgeglichen, gepatcht und kompiliert!")
           EOF
 
       - name: Upload Generated DTB Artifact

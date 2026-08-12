@@ -35,10 +35,10 @@ jobs:
 
           original_dtb = "rg32tw3ka.dtb"
           orig_dts = "original_decompiled.dts"
-          target_dtb = "rk3326-k36s-linux.dtb"
+          target_dtb = "rk3326-k36-linux.dtb"
           target_dts = "target_decompiled.dts"
           merged_dts = "merged.dts"
-          final_dtb = "rk3326-k36s-linux.dtb"
+          final_dtb = "rk3326-k36-linux.dtb"
 
           if not os.path.exists(original_dtb):
               raise FileNotFoundError(f"Original-DTB '{original_dtb}' wurde im Repository nicht gefunden!")
@@ -188,7 +188,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: patched-rk3326-dtb
-          path: rk3326-k36s-linux.dtb
+          path: rk3326-k36-linux.dtb
           retention-days: 14
 
       - name: Commit and Push Updated DTB back to Repo
@@ -197,5 +197,5 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add rk3326-k36s-linux.dtb
-          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: auto-diff, merge and patch rk3326-k36s-linux.dtb using original rg32tw3ka.dtb [skip ci]" && git push)
+          git add rk3326-k36-linux.dtb
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: auto-diff, merge and patch rk3326-k36-linux.dtb using original rg32tw3ka.dtb [skip ci]" && git push)

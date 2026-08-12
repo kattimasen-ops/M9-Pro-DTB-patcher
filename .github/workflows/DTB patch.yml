@@ -1,4 +1,4 @@
-name: RK3326 DTB Overclock & Hardware Patcher
+name: RK3326 DTB Diff, Merge & Overclock Patcher
 
 on:
   push:
@@ -13,7 +13,7 @@ permissions:
   contents: write
 
 jobs:
-  patch-dtb:
+    patch-and-merge-dtb:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -24,34 +24,57 @@ jobs:
       - name: Install Device Tree Compiler (dtc)
         run: |
           sudo apt-get update
-          sudo apt-get install -y device-tree-compiler python3
+          sudo apt-get install -y device-tree-compiler python3 python3-git
 
-      - name: Run DTB Decompilation and Patch Script
+      - name: Run Advanced DTB Decompilation, Diff & Merge Script
         run: |
           python3 - << 'EOF'
           import re
           import subprocess
           import os
 
-          dtb_input = "rg32tw3ka.dtb"
-          dts_interim = "decompiled.dts"
-          dtb_output = "rk3326-k36s-linux.dtb"
+          original_dtb = "rg32tw3ka.dtb"
+          orig_dts = "original_decompiled.dts"
+          target_dtb = "rk3326-k36s-linux.dtb"
+          target_dts = "target_decompiled.dts"
+          merged_dts = "merged.dts"
+          final_dtb = "rk3326-k36s-linux.dtb"
 
-          if not os.path.exists(dtb_input):
-              raise FileNotFoundError(f"Eingabe-DTB '{dtb_input}'-Datei wurde im Repository nicht gefunden!")
+          if not os.path.exists(original_dtb):
+              raise FileNotFoundError(f"Original-DTB '{original_dtb}' wurde im Repository nicht gefunden!")
 
-          print(f"[*] Dekompiliere {dtb_input} mit dtc...")
-          subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-o", dts_interim, dtb_input], check=True)
+          print(f"[*] Dekompiliere Original-DTB ({original_dtb})...")
+          subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-o", orig_dts, original_dtb], check=True)
 
-          with open(dts_interim, "r", encoding="utf-8") as f:
-              content = f.read()
+          # Falls die Ziel-DTB existiert, dekompilieren wir sie als Basis für den Abgleich
+          if os.path.exists(target_dtb):
+              print(f"[*] Dekompiliere bestehende Ziel-DTB ({target_dtb})...")
+              subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-o", target_dts, target_dtb], check=True)
+              with open(target_dts, "r", encoding="utf-8") as f:
+                  content = f.read()
+          else:
+              print(f"[*] Keine Ziel-DTB gefunden, verwende Original als Basis.")
+              with open(orig_dts, "r", encoding="utf-8") as f:
+                  content = f.read()
 
-          print("[*] Analysiere und patche DTS-Einträge...")
+          with open(orig_dts, "r", encoding="utf-8") as f:
+              orig_content = f.read()
 
-          # 1. Bereinige evtl. veraltete fehlerhafte Label-Referenzen im Root
+          print("[*] Führe Struktur- und Pfadabgleich mit dem Original durch...")
+
+          # 1. Korrigiere und aktualisiere SDIO-Status (Abgleich mit Original)
+          orig_sdio_match = re.search(r'(sdio\s*\{[^}]*status\s*=\s*"[^"]+"\s*;?[^}]*\})', orig_content, re.DOTALL)
+          if orig_sdio_match:
+              # Übernehme SDIO-Block aus dem Original, falls er im Ziel abweicht oder disabled ist
+              content = re.sub(r'sdio\s*\{[^}]*status\s*=\s*"disabled"\s*;?[^}]*\}', orig_sdio_match.group(1), content, flags=re.DOTALL)
+          
+          # Generelle Aktivierung von SDIO für WLAN
+          content = re.sub(r'(sdio\s*\{[^}]*status\s*=\s*")disabled(";)', r'\1okay\2', content)
+
+          # 2. Bereinige fehlerhafte Label-Referenzen im Root
           content = re.sub(r'&(?:cpu0_opp_table|gpu_opp_table|dmc_opp_table)\s*\{[^}]*\};\s*', '', content)
 
-          # 2. Füge Analogstick-LEDs hinzu (falls nicht vorhanden)
+          # 3. Ergänze fehlende Hardware-Module (Analogstick LEDs, WLAN, Bluetooth) falls nicht vorhanden
           if "led_left_stick" not in content and "gpio-leds" not in content:
               led_node = """
           	/* TeacupX / M9Pro Hardware - Analogstick LEDs */
@@ -76,7 +99,6 @@ jobs:
               if last_brace != -1:
                   content = content[:last_brace] + led_node + "\n" + content[last_brace:]
 
-          # 3. Füge Wireless WLAN hinzu (falls nicht vorhanden)
           if "wireless-wlan" not in content and "wlan-platdata" not in content:
               wifi_node = """
           	/* TeacupX Hardware - Wireless WLAN */
@@ -90,7 +112,6 @@ jobs:
               if last_brace != -1:
                   content = content[:last_brace] + wifi_node + "\n" + content[last_brace:]
 
-          # 4. Füge Wireless Bluetooth hinzu (falls nicht vorhanden)
           if "wireless-bluetooth" not in content and "bluetooth-platdata" not in content:
               bt_node = """
           	/* TeacupX Hardware - Wireless Bluetooth */
@@ -104,10 +125,7 @@ jobs:
               if last_brace != -1:
                   content = content[:last_brace] + bt_node + "\n" + content[last_brace:]
 
-          # 5. Aktiviere SDIO (wichtig für WLAN)
-          content = re.sub(r'(sdio\s*\{[^}]*status\s*=\s*")disabled(";)', r'\1okay\2', content)
-
-          # 6. TeacupX Overclocking Frequenzen (CPU, GPU, RAM/DMC) einfügen
+          # 4. TeacupX Overclocking-Einträge (CPU, GPU, RAM) einfügen oder aktualisieren
           cpu_oc = """
           		opp-1300000000 {
           			opp-hz = < 0x00 0x4d784000 >;
@@ -162,13 +180,13 @@ jobs:
                   pos = m.end()
                   content = content[:pos] + "\n" + dmc_oc + content[pos:]
 
-          # Schreibe gepatchte DTS
-          with open(dts_interim, "w", encoding="utf-8") as f:
+          # Speichere die gemergte DTS-Datei
+          with open(merged_dts, "w", encoding="utf-8") as f:
               f.write(content)
 
-          print(f"[*] Kompiliere modifizierte DTS zurück nach {dtb_output}...")
-          subprocess.run(["dtc", "-I", "dts", "-O", "dtb", "-f", "-o", dtb_output, dts_interim], check=True)
-          print("[✓] DTB erfolgreich generiert und gepatcht!")
+          print(f"[*] Kompiliere gemergte DTS zurück nach {final_dtb}...")
+          subprocess.run(["dtc", "-I", "dts", "-O", "dtb", "-f", "-o", final_dtb, merged_dts], check=True)
+          print("[✓] DTB erfolgreich abgeglichen, gepatcht und kompiliert!")
           EOF
 
       - name: Upload Generated DTB Artifact
@@ -178,11 +196,11 @@ jobs:
           path: rk3326-k36s-linux.dtb
           retention-days: 14
 
-      - name: Commit and Push Compiled DTB back to Repo
+      - name: Commit and Push Updated DTB back to Repo
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add rk3326-k36s-linux.dtb
-          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: auto-generate and patch rk3326-k36s-linux.dtb with TeacupX OC & Hardware [skip ci]" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: auto-diff, merge and patch rk3326-k36s-linux.dtb using original rg32tw3ka.dtb [skip ci]" && git push)

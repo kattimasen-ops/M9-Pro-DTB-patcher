@@ -112,8 +112,8 @@ jobs:
 
           def extract_root_nodes_by_keywords(text, keywords):
               extracted_blocks = []
-              # KI FIX: ^ garantiert, dass wir NUR Wurzelknoten extrahieren (keine Unterknoten mehr!)
-              for match in re.finditer(r'^([a-zA-Z0-9_,+-]+)(?:@[a-zA-Z0-9_,+-]+)?\s*\{', text, re.MULTILINE):
+              # KI FIX: Berücksichtigt nun auch Tabulatoren (\t) vor den Root-Nodes!
+              for match in re.finditer(r'^[ \t]*([a-zA-Z0-9_,+-]+)(?:@[a-zA-Z0-9_,+-]+)?\s*\{', text, re.MULTILINE):
                   decl = match.group(0)
                   node_name = match.group(1)
                   start_idx = match.start()

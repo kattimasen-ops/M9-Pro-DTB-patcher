@@ -1,230 +1,188 @@
-name: RK3326 - Patch K36S DTB (Hardware Sync + TeacupX OC)
+name: RK3326 DTB Overclock & Hardware Patcher
 
 on:
+  push:
+    branches: [ "main", "master" ]
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
 
 jobs:
-  patch-and-overclock-dtb:
+  patch-dtb:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Install System Tools
+      - name: Install Device Tree Compiler (dtc)
         run: |
           sudo apt-get update
           sudo apt-get install -y device-tree-compiler python3
 
-      - name: Step 1 - Suche & Dekompiliere beide DTB-Dateien
+      - name: Run DTB Decompilation and Patch Script
         run: |
-          echo "=== 1. Dekompiliere DTB-Dateien zu DTS ==="
-          
-          # Suche rk3326-k36s-linux.dtb
-          TARGET_DTB=$(find . -type f -name "rk3326-k36s-linux.dtb" ! -path "*/.git/*" | head -n 1)
-          # Suche rg32tw3ka.dtb
-          REF_DTB=$(find . -type f -name "rg32tw3ka.dtb" ! -path "*/.git/*" | head -n 1)
-
-          if [ -z "$TARGET_DTB" ]; then
-            echo "::error::rk3326-k36s-linux.dtb nicht im Repository gefunden!"
-            exit 1
-          fi
-
-          echo "Gefunden Target DTB: $TARGET_DTB"
-          dtc -I dtb -O dts -o rk3326-k36s-linux.dts "$TARGET_DTB"
-
-          if [ -n "$REF_DTB" ]; then
-            echo "Gefunden Referenz DTB: $REF_DTB"
-            dtc -I dtb -O dts -o rg32tw3ka.dts "$REF_DTB"
-          else
-            echo "::warning::rg32tw3ka.dtb nicht gefunden - fahre mit Standard-Fallbacks fort."
-          fi
-
-      - name: Step 2 - Python Patching (Hardware Injection + TeacupX Overclocking)
-        run: |
-          echo "=== 2. Analysiere & Patche rk3326-k36s-linux.dts ==="
           python3 - << 'EOF'
-          import os
           import re
+          import subprocess
+          import os
 
-          target_dts = "rk3326-k36s-linux.dts"
-          ref_dts = "rg32tw3ka.dts"
+          dtb_input = "rg32tw3ka.dtb"
+          dts_interim = "decompiled.dts"
+          dtb_output = "rk3326-k36s-linux.dtb"
 
-          if not os.path.exists(target_dts):
-              print("::error::Target DTS exisitiert nicht!")
-              exit(1)
+          if not os.path.exists(dtb_input):
+              raise FileNotFoundError(f"Eingabe-DTB '{dtb_input}'-Datei wurde im Repository nicht gefunden!")
 
-          with open(target_dts, "r", encoding="utf-8", errors="ignore") as f:
+          print(f"[*] Dekompiliere {dtb_input} mit dtc...")
+          subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-o", dts_interim, dtb_input], check=True)
+
+          with open(dts_interim, "r", encoding="utf-8") as f:
               content = f.read()
 
-          ref_content = ""
-          if os.path.exists(ref_dts):
-              with open(ref_dts, "r", encoding="utf-8", errors="ignore") as f:
-                  ref_content = f.read()
+          print("[*] Analysiere und patche DTS-Einträge...")
 
-          modified = False
+          # 1. Bereinige evtl. veraltete fehlerhafte Label-Referenzen im Root
+          content = re.sub(r'&(?:cpu0_opp_table|gpu_opp_table|dmc_opp_table)\s*\{[^}]*\};\s*', '', content)
 
-          # -------------------------------------------------------------
-          # 1. HARDWARE-INJEKTION (WiFi, Bluetooth, Stick LEDs)
-          # -------------------------------------------------------------
-
-          # Analogstick LEDs
+          # 2. Füge Analogstick-LEDs hinzu (falls nicht vorhanden)
           if "led_left_stick" not in content and "gpio-leds" not in content:
-              print("[+] Füge Analogstick-LED Nodes hinzu...")
               led_node = """
-          \t/* TeacupX / M9Pro Hardware - Analogstick LEDs */
-          \tgpio-leds {
-          \t\tcompatible = "gpio-leds";
-          \t\tpinctrl-names = "default";
+          	/* TeacupX / M9Pro Hardware - Analogstick LEDs */
+          	gpio-leds {
+          		compatible = "gpio-leds";
+          		pinctrl-names = "default";
 
-          \t\tstick_led_left {
-          \t\t\tlabel = "led_left_stick";
-          \t\t\tgpios = <&gpio3 0x08 0x00>;
-          \t\t\tdefault-state = "on";
-          \t\t};
+          		stick_led_left {
+          			label = "led_left_stick";
+          			gpios = <&gpio3 0x08 0x00>;
+          			default-state = "on";
+          		};
 
-          \t\tstick_led_right {
-          \t\t\tlabel = "led_right_stick";
-          \t\t\tgpios = <&gpio3 0x09 0x00>;
-          \t\t\tdefault-state = "on";
-          \t\t};
-          \t};
+          		stick_led_right {
+          			label = "led_right_stick";
+          			gpios = <&gpio3 0x09 0x00>;
+          			default-state = "on";
+          		};
+          	};
           """
               last_brace = content.rfind("};")
-              content = content[:last_brace] + led_node + "\n" + content[last_brace:]
-              modified = True
+              if last_brace != -1:
+                  content = content[:last_brace] + led_node + "\n" + content[last_brace:]
 
-          # Wireless WLAN (Wi-Fi)
-          if "wireless-wlan" not in content:
-              print("[+] Füge Wi-Fi Node (wireless-wlan) hinzu...")
+          # 3. Füge Wireless WLAN hinzu (falls nicht vorhanden)
+          if "wireless-wlan" not in content and "wlan-platdata" not in content:
               wifi_node = """
-          \t/* TeacupX Hardware - Wireless WLAN */
-          \twireless_wlan: wireless-wlan {
-          \t\tcompatible = "wlan-platdata";
-          \t\twifi_chip_type = "generic";
-          \t\tstatus = "okay";
-          \t};
+          	/* TeacupX Hardware - Wireless WLAN */
+          	wireless_wlan: wireless-wlan {
+          		compatible = "wlan-platdata";
+          		wifi_chip_type = "generic";
+          		status = "okay";
+          	};
           """
               last_brace = content.rfind("};")
-              content = content[:last_brace] + wifi_node + "\n" + content[last_brace:]
-              modified = True
+              if last_brace != -1:
+                  content = content[:last_brace] + wifi_node + "\n" + content[last_brace:]
 
-          # Wireless Bluetooth
-          if "wireless-bluetooth" not in content:
-              print("[+] Füge Bluetooth Node (wireless-bluetooth) hinzu...")
+          # 4. Füge Wireless Bluetooth hinzu (falls nicht vorhanden)
+          if "wireless-bluetooth" not in content and "bluetooth-platdata" not in content:
               bt_node = """
-          \t/* TeacupX Hardware - Wireless Bluetooth */
-          \twireless_bluetooth: wireless-bluetooth {
-          \t\tcompatible = "bluetooth-platdata";
-          \t\twifi-bt-power-toggle;
-          \t\tstatus = "okay";
-          \t};
+          	/* TeacupX Hardware - Wireless Bluetooth */
+          	wireless_bluetooth: wireless-bluetooth {
+          		compatible = "bluetooth-platdata";
+          		wifi-bt-power-toggle;
+          		status = "okay";
+          	};
           """
               last_brace = content.rfind("};")
-              content = content[:last_brace] + bt_node + "\n" + content[last_brace:]
-              modified = True
+              if last_brace != -1:
+                  content = content[:last_brace] + bt_node + "\n" + content[last_brace:]
 
-          # SDIO status "okay" erzwingen für WLAN Chip
+          # 5. Aktiviere SDIO (wichtig für WLAN)
           content = re.sub(r'(sdio\s*\{[^}]*status\s*=\s*")disabled(";)', r'\1okay\2', content)
 
+          # 6. TeacupX Overclocking Frequenzen (CPU, GPU, RAM/DMC) einfügen
+          cpu_oc = """
+          		opp-1300000000 {
+          			opp-hz = < 0x00 0x4d784000 >;
+          			opp-microvolt = < 0x1406f0 >;
+          		};
+          		opp-1416000000 {
+          			opp-hz = < 0x00 0x5463b000 >;
+          			opp-microvolt = < 0x14fb18 >;
+          		};
+          		opp-1512000000 {
+          			opp-hz = < 0x00 0x5a1f4000 >;
+          			opp-microvolt = < 0x155cc0 >;
+          		};"""
 
-          # -------------------------------------------------------------
-          # 2. TEACUPX OVERCLOCKING FREQUENZEN INJIZIEREN
-          # -------------------------------------------------------------
-          print("[+] Injiziere TeacupX Overclock Frequenzen (CPU, GPU, RAM)...")
+          if "opp-1300000000" not in content:
+              m = re.search(r'(opp-(?:1200000000|1100000000|1000000000|312000000)\s*\{[^}]*\};)', content)
+              if m:
+                  pos = m.end()
+                  content = content[:pos] + "\n" + cpu_oc + content[pos:]
 
-          oc_nodes = """
-          /* TeacupX RK3326 Overclocking OPP Profile */
-          &cpu0_opp_table {
-          \topp-1300000000 {
-          \t\topp-hz = <0x00 0x4d784000>;
-          \t\topp-microvolt = <0x1406f0>;
-          \t};
-          \topp-1416000000 {
-          \t\topp-hz = <0x00 0x5463b000>;
-          \t\topp-microvolt = <0x14fb18>;
-          \t};
-          \topp-1512000000 {
-          \t\topp-hz = <0x00 0x5a1f4000>;
-          \t\topp-microvolt = <0x155cc0>;
-          \t};
-          };
+          gpu_oc = """
+          		opp-667000000 {
+          			opp-hz = < 0x00 0x27c95b00 >;
+          			opp-microvolt = < 0x13d620 >;
+          		};
+          		opp-700000000 {
+          			opp-hz = < 0x00 0x29b92700 >;
+          			opp-microvolt = < 0x1406f0 >;
+          		};
+          		opp-800000000 {
+          			opp-hz = < 0x00 0x2fa0be00 >;
+          			opp-microvolt = < 0x14f000 >;
+          		};"""
 
-          &gpu_opp_table {
-          \topp-667000000 {
-          \t\topp-hz = <0x00 0x27c95b00>;
-          \t\topp-microvolt = <0x13d620>;
-          \t};
-          \topp-700000000 {
-          \t\topp-hz = <0x00 0x29b92700>;
-          \t\topp-microvolt = <0x1406f0>;
-          \t};
-          \topp-800000000 {
-          \t\topp-hz = <0x00 0x2fa0be00>;
-          \t\topp-microvolt = <0x14f000>;
-          \t};
-          };
+          if "opp-700000000" not in content:
+              m = re.search(r'(opp-(?:520000000|600000000|400000000|200000000)\s*\{[^}]*\};)', content)
+              if m:
+                  pos = m.end()
+                  content = content[:pos] + "\n" + gpu_oc + content[pos:]
 
-          &dmc_opp_table {
-          \topp-933000000 {
-          \t\topp-hz = <0x00 0x379c29c0>;
-          \t};
-          \topp-1056000000 {
-          \t\topp-hz = <0x00 0x3ef14800>;
-          \t};
-          };
-          """
+          dmc_oc = """
+          		opp-933000000 {
+          			opp-hz = < 0x00 0x379c29c0 >;
+          		};
+          		opp-1056000000 {
+          			opp-hz = < 0x00 0x3ef14800 >;
+          		};"""
 
-          # OC Profile ans Ende der DTS anfügen
-          content += "\n" + oc_nodes + "\n"
+          if "opp-1056000000" not in content:
+              m = re.search(r'(opp-786000000\s*\{[^}]*\};|opp-667000000\s*\{[^}]*\};|dmc-opp-table\s*\{)', content)
+              if m:
+                  pos = m.end()
+                  content = content[:pos] + "\n" + dmc_oc + content[pos:]
 
-          with open(target_dts, "w", encoding="utf-8") as f:
+          # Schreibe gepatchte DTS
+          with open(dts_interim, "w", encoding="utf-8") as f:
               f.write(content)
 
-          print("[✓] Modifikationen an rk3326-k36s-linux.dts erfolgreich durchgeführt!")
+          print(f"[*] Kompiliere modifizierte DTS zurück nach {dtb_output}...")
+          subprocess.run(["dtc", "-I", "dts", "-O", "dtb", "-f", "-o", dtb_output, dts_interim], check=True)
+          print("[✓] DTB erfolgreich generiert und gepatcht!")
           EOF
 
-      - name: Step 3 - Kompiliere DTS zurück zu DTB
-        run: |
-          echo "=== 3. Kompiliere gepatchte DTS -> DTB ==="
-          
-          # Kompiliere k36s DTB
-          dtc -I dts -O dtb -o rk3326-k36s-linux.dtb rk3326-k36s-linux.dts -W no-unit_address_vs_reg -W no-avoid_unnecessary_addr_size -W no-graph_child_address || {
-            echo "::warning::Standard Kompilierung fehlgeschlagen, versuche kulanten Modus..."
-            dtc -I dts -O dtb -o rk3326-k36s-linux.dtb rk3326-k36s-linux.dts -w
-          }
-
-          # Falls rg32tw3ka.dts vorhanden ist, kompiliere sie ebenfalls frisch
-          if [ -f "rg32tw3ka.dts" ]; then
-            dtc -I dts -O dtb -o rg32tw3ka.dtb rg32tw3ka.dts -W no-unit_address_vs_reg -W no-avoid_unnecessary_addr_size -w || true
-          fi
-
-          echo "Kompilierung erfolgreich abgeschlossen!"
-
-      - name: Step 4 - Kopiere gepatchte Dateien im Repository
-        run: |
-          echo "=== 4. Aktualisiere Dateien im Repo ==="
-          find . -type f -name "rk3326-k36s-linux.dtb" -exec cp rk3326-k36s-linux.dtb {} \;
-          find . -type f -name "rk3326-k36s-linux.dts" -exec cp rk3326-k36s-linux.dts {} \;
-          [ -f "rg32tw3ka.dtb" ] && find . -type f -name "rg32tw3ka.dtb" -exec cp rg32tw3ka.dtb {} \; || true
-
-      - name: Step 5 - Git Commit & Push zurück ins Repository
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "auto-patch: Update rk3326-k36s-linux.dtb with TeacupX OC & WiFi/BT/LEDs"
-          file_pattern: "*.dtb *.dts"
-
-      - name: Step 6 - Bereitstellen als Download-Artefakt
+      - name: Upload Generated DTB Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Patched_K36S_DTB_Files
-          path: |
-            rk3326-k36s-linux.dtb
-            rk3326-k36s-linux.dts
-            rg32tw3ka.dtb
-            rg32tw3ka.dts
+          name: patched-rk3326-dtb
+          path: rk3326-k36s-linux.dtb
+          retention-days: 14
+
+      - name: Commit and Push Compiled DTB back to Repo
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add rk3326-k36s-linux.dtb
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: auto-generate and patch rk3326-k36s-linux.dtb with TeacupX OC & Hardware [skip ci]" && git push)

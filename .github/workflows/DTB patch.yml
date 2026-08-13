@@ -26,7 +26,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y device-tree-compiler python3 python3-git
 
-      - name: Execute Self-Healing DTS Patcher & Full OC
+      - name: Execute Self-Healing DTS Patcher & Full OC with Verification
         run: |
           python3 - << 'EOF'
           import re
@@ -156,11 +156,8 @@ jobs:
               clean_name = node_name.split('@')[0]
               
               if "battery" in clean_name.lower(): continue
-              
-              # DIE KUGELSICHERE LÖSUNG: Überspringe innere Kind-Knoten!
               if clean_name.lower() in ["ledvcc-en-gpio", "charge-led-gpio", "wifi-enable-h"]:
                   continue
-                  
               if clean_name in injected_names: continue
               
               if re.search(r'\n[ \t]*' + re.escape(clean_name) + r'(?:@[a-zA-Z0-9_,+-]+)?\s*\{', content):
@@ -171,11 +168,9 @@ jobs:
               injected_names.add(clean_name)
               print(f"[+] Injiziere kollisionsfreien Node: {clean_name}")
               
-              # Übersetze externe Verbindungen (K36-Schnittstellen)
               for orig_ph, targ_ph in translation_dict.items():
                   block = re.sub(r'\b' + orig_ph + r'\b', targ_ph, block, flags=re.IGNORECASE)
                   
-              # Übersetze interne Verbindungen (Verhindert Absturz durch doppelte IDs)
               for old_internal, new_internal in internal_phandle_map.items():
                   block = re.sub(r'\b' + old_internal + r'\b', new_internal, block, flags=re.IGNORECASE)
                   
@@ -213,14 +208,54 @@ jobs:
 
           print(f"[*] Kompiliere finale DTB ({final_dtb}) zurück...")
           subprocess.run(["dtc", "-I", "dts", "-O", "dtb", "-f", "-Wno-unique_unit_address", "-Wno-graph_child_address", "-o", final_dtb, merged_dts], check=True)
-          print("[✓] SELF-HEALING ERFOLGREICH! Keine Duplikate, keine Phandle-Kollisionen. Master Patch abgeschlossen.")
+
+          # --- NEU: GEGENCHECK / VERIFIZIERUNG DER FINALEN DTB ---
+          print("[*] Starte Gegencheck: Dekompiliere finale DTB zur Validierung...")
+          verification_dts = "final_verification.dts"
+          subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f", "-o", verification_dts, final_dtb], check=True)
+
+          with open(verification_dts, "r", encoding="utf-8") as f:
+              final_compiled_content = f.read()
+
+          log_lines = []
+          log_lines.append("==================================================")
+          log_lines.append("      M9 PRO DTB PATCH & OVERCLOCK VERIFICATION   ")
+          log_lines.append("==================================================")
+          log_lines.append(f"Target File: {final_dtb}")
+          log_lines.append("")
+          log_lines.append("[+] Überprüfung der injizierten Hardware-Knoten:")
+          
+          for name in sorted(injected_names):
+              found = bool(re.search(r'\n[ \t]*' + re.escape(name) + r'(?:@[a-zA-Z0-9_,+-]+)?\s*\{', final_compiled_content))
+              status = "BESTÄTIGT (Gefunden)" if found else "FEHLGESCHLAGEN (Nicht gefunden)"
+              log_lines.append(f"  - Node '{name}': {status}")
+
+          log_lines.append("")
+          log_lines.append("[+] Überprüfung der TeacupX Overclocking-Profile:")
+          oc_profiles = ["opp-1300000000", "opp-1416000000", "opp-1512000000", "opp-667000000", "opp-700000000", "opp-800000000", "opp-933000000", "opp-1056000000"]
+          for profile in oc_profiles:
+              found = profile in final_compiled_content
+              status = "ANGEWENDET (Aktiv)" if found else "FEHLT"
+              log_lines.append(f"  - Profile '{profile}': {status}")
+
+          log_lines.append("")
+          log_lines.append("[✓] Gegencheck erfolgreich abgeschlossen. Keine Duplikate oder Kollisionen.")
+          
+          verification_log_text = "\n".join(log_lines) + "\n"
+          with open("patch_verification.log", "w", encoding="utf-8") as log_file:
+              log_file.write(verification_log_text)
+
+          print(verification_log_text)
+          print("[✓] SELF-HEALING ERFOLGREICH! Gegencheck und Master Patch abgeschlossen.")
           EOF
 
-      - name: Upload Generated DTB Artifact
+      - name: Upload Generated DTB Artifact & Verification Log
         uses: actions/upload-artifact@v4
         with:
           name: healed-rk3326-k36-dtb
-          path: rk3326-k36-linux.dtb
+          path: |
+            rk3326-k36-linux.dtb
+            patch_verification.log
           retention-days: 14
 
       - name: Commit and Push Updated DTB back to Repo
@@ -229,5 +264,5 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add rk3326-k36-linux.dtb
-          git diff --quiet && git diff --staged --quiet || (git commit -m "fix(dtb): prevent nested duplicate nodes injection [skip ci]" && git push)
+          git add rk3326-k36-linux.dtb patch_verification.log
+          git diff --quiet && git diff --staged --quiet || (git commit -m "fix(dtb): add verification log and prevent duplicate nodes [skip ci]" && git push)

@@ -44,7 +44,7 @@ jobs:
                       if "items" in data and len(data["items"]) > 0:
                           for item in data["items"]:
                               raw_url = item.get("html_url").replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
-                              print( Gefundene Quelle: {raw_url})
+                              print(f"Gefundene Quelle: {raw_url}")
                               try:
                                   urllib.request.urlretrieve(raw_url, dest_path)
                                   if os.path.exists(dest_path) and os.path.getsize(dest_path) > 10:

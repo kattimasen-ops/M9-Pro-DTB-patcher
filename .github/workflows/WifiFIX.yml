@@ -1,0 +1,145 @@
+name: Auto-Search & Build RK915 WiFi Package
+
+on:
+  workflow_dispatch:
+
+jobs:
+  search-and-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Suche Dateien, erstelle Skript und packe Artifact
+        run: |
+          python3 - << 'EOF'
+          import os
+          import json
+          import urllib.request
+          import urllib.error
+
+          output_dir = "wifi_package"
+          firmware_dir = os.path.join(output_dir, "lib", "firmware")
+          os.makedirs(firmware_dir, exist_ok=True)
+
+          def search_and_download_github(filename, dest_path):
+              print(f"[*] Suche nach '{filename}' über die GitHub API...")
+              api_url = f"https://api.github.com/search/code?q={filename}+filename:{filename}"
+              
+              req = urllib.request.Request(
+                  api_url, 
+                  headers={"User-Agent": "Mozilla/5.0 (Compatible; M9Pro-Bot/1.0)"}
+              )
+              
+              download_success = False
+              try:
+                  with urllib.request.urlopen(req) as response:
+                      data = json.loads(response.read().decode())
+                      if "items" in data and len(data["items"]) > 0:
+                          for item in data["items"]:
+                              raw_url = item.get("html_url").replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+                              print( Gefundene Quelle: {raw_url})
+                              try:
+                                  urllib.request.urlretrieve(raw_url, dest_path)
+                                  if os.path.exists(dest_path) and os.path.getsize(dest_path) > 10:
+                                      print(f"[✓] {filename} erfolgreich heruntergeladen!")
+                                      download_success = True
+                                      break
+                              except Exception as sub_e:
+                                  print(f"[-] Konnte nicht von {raw_url} laden: {sub_e}")
+              except Exception as e:
+                  print(f"[-] GitHub API Such-Fehler: {e}")
+
+              # Fallback auf bekannte direkte Raw-Quellen, falls API fehlschlägt
+              if not download_success:
+                  print(f"[*] Nutze Fallback-Quellen für {filename}...")
+                  fallbacks = [
+                      f"https://raw.githubusercontent.com/AeolusUX/R36S-DTB/main/wifi/{filename}",
+                      f"https://raw.githubusercontent.com/k36-handheld/firmware/main/{filename}"
+                  ]
+                  for fb_url in fallbacks:
+                      try:
+                          print(f"[*] Versuche Fallback: {fb_url}")
+                          urllib.request.urlretrieve(fb_url, dest_path)
+                          if os.path.exists(dest_path) and os.path.getsize(dest_path) > 10:
+                              print(f"[✓] {filename} via Fallback geladen!")
+                              download_success = True
+                              break
+                      except:
+                          pass
+
+              if not download_success:
+                  print(f"[!] Warnung: Konnte {filename} nicht automatisch finden. Erstelle Platzhalter.")
+                  with open(dest_path, "w") as f:
+                      f.write("PLACEHOLDER")
+
+          # 1. Dateien suchen und herunterladen
+          search_and_download_github("rk915_cal.bin", os.path.join(firmware_dir, "rk915_cal.bin"))
+          search_and_download_github("rk915_rf_para.txt", os.path.join(firmware_dir, "rk915_rf_para.txt"))
+
+          # 2. Dynamisches .sh Installationsskript erstellen
+          sh_script_path = os.path.join(output_dir, "install_wifi.sh")
+          sh_content = """#!/bin/bash
+          # ==========================================
+          # M9 Pro RK915 WiFi Auto-Installer Skript
+          # Führe dieses Skript auf deinem Handheld aus
+          # ==========================================
+
+          if [ "$EUID" -ne 0 ]; then
+            echo "[-] Bitte starte das Skript mit Root-Rechten!"
+            exit 1
+          fi
+
+          echo "[*] Starte WLAN-Installation für M9 Pro..."
+          
+          # Partition beschreibbar machen
+          mount -o remount,rw / 2>/dev/null || true
+
+          # Zielordner anlegen
+          mkdir -p /lib/firmware
+
+          # Prüfen ob die Dateien im selben Verzeichnis liegen
+          if [ -d "./lib/firmware" ]; then
+              cp -v ./lib/firmware/rk915_cal.bin /lib/firmware/
+              cp -v ./lib/firmware/rk915_rf_para.txt /lib/firmware/
+          elif [ -f "./rk915_cal.bin" ]; then
+              cp -v ./rk915_cal.bin /lib/firmware/
+              cp -v ./rk915_rf_para.txt /lib/firmware/
+          else
+              echo "[-] Fehler: Firmware-Dateien im Ordner nicht gefunden!"
+              exit 1
+          fi
+
+          # Rechte korrigieren
+          chmod 644 /lib/firmware/rk915_cal.bin
+          chmod 644 /lib/firmware/rk915_rf_para.txt
+
+          echo "[*] Initialisiere RK915 Kernel-Modul..."
+          modprobe -r rk915 2>/dev/null || true
+          modprobe rk915 2>/dev/null || true
+
+          echo "=========================================="
+          echo "[✓] Installation abgeschlossen!"
+          echo "Bitte starte das M9 Pro jetzt einmal neu."
+          echo "=========================================="
+          """
+
+          with open(sh_script_path, "w", encoding="utf-8") as f:
+              f.write(sh_content)
+          
+          os.chmod(sh_script_path, 0o755)
+          print("[✓] Installations-Skript 'install_wifi.sh' erfolgreich generiert.")
+          EOF
+
+      - name: Paket als Artifact hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: m9pro-wifi-complete-kit
+          path: wifi_package/
+          retention-days: 7

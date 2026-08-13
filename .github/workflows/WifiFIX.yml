@@ -1,4 +1,4 @@
-name: Auto-Search & Build RK915 WiFi Package
+name: Ultimate CFW Search & Build RK915 WiFi Package
 
 on:
   workflow_dispatch:
@@ -6,6 +6,8 @@ on:
 jobs:
   search-and-build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout Repository
@@ -16,91 +18,110 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Repositories klonen, echte Firmware finden und Skript erstellen
+      - name: Durchsuche dArkOSRE, arkos4clone, Rocknix, EmuELEC & GitHub nach echten Dateien
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 - << 'EOF'
           import os
+          import json
+          import urllib.request
+          import urllib.error
           import subprocess
           import shutil
-          import urllib.request
 
           output_dir = "wifi_package"
           firmware_dir = os.path.join(output_dir, "lib", "firmware")
           os.makedirs(firmware_dir, exist_ok=True)
 
-          repos_to_clone = [
-              "https://github.com/lcdyk0517/arkos4clone.git",
-              "https://github.com/AeolusUX/ArkOS-R3XS.git"
-          ]
+          cal_path = os.path.join(firmware_dir, "rk915_cal.bin")
+          para_path = os.path.join(firmware_dir, "rk915_rf_para.txt")
 
-          found_cal = False
-          found_para = False
-          clone_base = "cloned_repos"
-          os.makedirs(clone_base, exist_ok=True)
+          token = os.environ.get("GITHUB_TOKEN")
+          got_cal = False
+          got_para = False
 
-          # 1. Versuche die Dateien über einen Git-Klon zu finden
-          for i, repo_url in enumerate(repos_to_clone):
-              repo_path = os.path.join(clone_base, f"repo_{i}")
-              print(f"[*] Klone Repository: {repo_url} ...")
+          def search_github_api(filename, dest_path):
+              print(f"[*] Suche über GitHub API nach '{filename}'...")
+              api_url = f"https://api.github.com/search/code?q={filename}+filename:{filename}"
+              req = urllib.request.Request(
+                  api_url,
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "M9Pro-Firmware-Finder"
+                  }
+              )
               try:
-                  subprocess.run(["git", "clone", "--depth", "1", repo_url, repo_path], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                  with urllib.request.urlopen(req) as response:
+                      data = json.loads(response.read().decode())
+                      if "items" in data and len(data["items"]) > 0:
+                          for item in data["items"]:
+                              html_url = item.get("html_url")
+                              raw_url = html_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+                              print(f"[+] Versuche Download von: {raw_url}")
+                              try:
+                                  urllib.request.urlretrieve(raw_url, dest_path)
+                                  if os.path.exists(dest_path) and os.path.getsize(dest_path) > 10:
+                                      print(f"[✓] {filename} erfolgreich via API geladen!")
+                                      return True
+                              except Exception as e:
+                                  print(f"[-] Download fehlgeschlagen: {e}")
               except Exception as e:
-                  print(f"[-] Fehler beim Klonen von {repo_url}: {e}")
-                  continue
+                  print(f"[-] GitHub API Such-Fehler: {e}")
+              return False
 
-              for root, dirs, files in os.walk(repo_path):
-                  if "rk915_cal.bin" in files and not found_cal:
-                      src = os.path.join(root, "rk915_cal.bin")
-                      shutil.copy2(src, os.path.join(firmware_dir, "rk915_cal.bin"))
-                      print("[✓] rk915_cal.bin erfolgreich aus Repo extrahiert!")
-                      found_cal = True
+          # 1. API-Suche starten
+          if not got_cal:
+              got_cal = search_github_api("rk915_cal.bin", cal_path)
+          if not got_para:
+              got_para = search_github_api("rk915_rf_para.txt", para_path)
 
-                  if "rk915_rf_para.txt" in files and not found_para:
-                      src = os.path.join(root, "rk915_rf_para.txt")
-                      shutil.copy2(src, os.path.join(firmware_dir, "rk915_rf_para.txt"))
-                      print("[✓] rk915_rf_para.txt erfolgreich aus Repo extrahiert!")
-                      found_para = True
+          # 2. Gezieltes Klonen aller relevanten Custom-Firmware-Quellen (inkl. dArkOSRE & arkos4clone)
+          if not got_cal or not got_para:
+              print("[*] API-Suche unvollständig. Klone und durchsuche dArkOSRE, arkos4clone, Rocknix, EmuELEC...")
+              target_repos = [
+                  "https://github.com/southoz/dArkOSRE-R36.git",
+                  "https://github.com/lcdyk0517/arkos4clone.git",
+                  "https://github.com/ROCKNIX/distribution.git",
+                  "https://github.com/EmuELEC/EmuELEC.git",
+                  "https://github.com/AeolusUX/ArkOS-R3XS.git"
+              ]
+              
+              os.makedirs("cfw_clones", exist_ok=True)
+              for repo in target_repos:
+                  repo_name = repo.split("/")[-1].replace(".git", "")
+                  local_repo_path = os.path.join("cfw_clones", repo_name)
+                  print(f"[*] Klone Repository (shallow): {repo} ...")
+                  try:
+                      subprocess.run(["git", "clone", "--depth", "1", repo, local_repo_path], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                  except Exception as e:
+                      print(f"[-] Konnte {repo} nicht klonen: {e}")
+                      continue
 
-              if found_cal and found_para:
-                  break
+                  for root, dirs, files in os.walk(local_repo_path):
+                      if not got_cal and "rk915_cal.bin" in files:
+                          src = os.path.join(root, "rk915_cal.bin")
+                          shutil.copy2(src, cal_path)
+                          print(f"[✓] rk915_cal.bin aus {repo_name} extrahiert!")
+                          got_cal = True
+                      if not got_para and "rk915_rf_para.txt" in files:
+                          src = os.path.join(root, "rk915_rf_para.txt")
+                          shutil.copy2(src, para_path)
+                          print(f"[✓] rk915_rf_para.txt aus {repo_name} extrahiert!")
+                          got_para = True
 
-          # 2. Direkter Fallback über bekannte direkte Raw-Quellen, falls nötig
-          if not found_cal or not found_para:
-              print("[*] Nutze direkte Quell-URLs als Fallback...")
-              direct_urls = {
-                  "rk915_cal.bin": [
-                      "https://raw.githubusercontent.com/lcdyk0517/arkos4clone/main/drivers/wifi/rk915/rk915_cal.bin",
-                      "https://raw.githubusercontent.com/AeolusUX/ArkOS-R3XS/main/drivers/wifi/rk915/rk915_cal.bin"
-                  ],
-                  "rk915_rf_para.txt": [
-                      "https://raw.githubusercontent.com/lcdyk0517/arkos4clone/main/drivers/wifi/rk915/rk915_rf_para.txt",
-                      "https://raw.githubusercontent.com/AeolusUX/ArkOS-R3XS/main/drivers/wifi/rk915/rk915_rf_para.txt"
-                  ]
-              }
+                  if got_cal and got_para:
+                      print("[✓] Beide Dateien erfolgreich in Repositories gefunden!")
+                      break
 
-              for fname, urls in direct_urls.items():
-                  dest_path = os.path.join(firmware_dir, fname)
-                  if fname == "rk915_cal.bin" and found_cal: continue
-                  if fname == "rk915_rf_para.txt" and found_para: continue
+          # KEINE PLATZHALTER: Strenger Check bricht bei Nichterfolg hart ab
+          if not got_cal or not got_para:
+              raise RuntimeError("[X] FEHLER: Die echten RK915 Firmware-Dateien konnten in keiner Quelle gefunden werden!")
 
-                  for url in urls:
-                      try:
-                          print(f"[*] Lade {fname} von {url} ...")
-                          req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                          with urllib.request.urlopen(req) as response, open(dest_path, 'wb') as out_file:
-                              out_file.write(response.read())
-                          if os.path.exists(dest_path) and os.path.getsize(dest_path) > 10:
-                              print(f"[✓] {fname} erfolgreich geladen!")
-                              if fname == "rk915_cal.bin": found_cal = True
-                              if fname == "rk915_rf_para.txt": found_para = True
-                              break
-                      except Exception as e:
-                          print(f"[-] Download fehlgeschlagen: {e}")
+          print("[✓] Verifikation erfolgreich: Echte Binärdateien bereitgestellt.")
 
-          if not found_cal or not found_para:
-              raise RuntimeError("[!] Fehler: Die echten Firmware-Dateien konnten nicht ermittelt werden.")
-
-          # 3. Dynamisches .sh Installationsskript erstellen (vollständig ohne Platzhalter)
+          # 3. Generiere das passende .sh Installationsskript
           sh_script_path = os.path.join(output_dir, "install_wifi.sh")
           sh_content = """#!/bin/bash
           # ==========================================
@@ -128,7 +149,7 @@ jobs:
               cp -v ./rk915_cal.bin /lib/firmware/
               cp -v ./rk915_rf_para.txt /lib/firmware/
           else
-              echo "[-] Fehler: Firmware-Dateien nicht gefunden!"
+              echo "[-] Fehler: Firmware-Dateien im Verzeichnis nicht gefunden!"
               exit 1
           fi
 

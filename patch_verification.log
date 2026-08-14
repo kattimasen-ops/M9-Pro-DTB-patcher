@@ -1,55 +1,22 @@
 ==================================================
-      M9 PRO DTB PATCH & OVERCLOCK VERIFICATION
+      M9 PRO DTB PATCH & OVERCLOCK VERIFICATION   
 ==================================================
-[+] LED nodes from stock (joystick rings):
-  - lcdc-m0-rgb-pins: OK
-  - lcdc-m1-rgb-pins: OK
-  - pwm0: OK
-  - pwm0-pin: OK
-  - pwm1: OK
-  - pwm1-pin: OK
-  - pwm2: OK
-  - pwm2-pin: OK
-  - pwm3: OK
-  - pwm3-pin: OK
-  - pwm4: OK
-  - pwm4-pin: OK
-  - pwm5: OK
-  - pwm5-pin: OK
-  - pwm6: OK
-  - pwm6-pin: OK
-  - pwm7: OK
-  - pwm7-pin: OK
-  - isp-prelight: OK
-  - vcc-led: OK
-  - ledvcc-en-gpio: OK
-  - play_joystick: OK
-  - backlight: OK
-  - led-vcc: OK
-[+] WiFi nodes from RGB20S:
-  - sdio: OK
-  - sdio-clk: OK
-  - sdio-cmd: OK
-  - sdio-bus4: OK
-  - sdio-gpio: OK
-[+] CPU overclocking steps:
-  - opp-1008000000: ACTIVE
-  - opp-1104000000: MISSING
-  - opp-1200000000: ACTIVE
-  - opp-1296000000: ACTIVE
-  - opp-1392000000: MISSING
-  - opp-1488000000: ACTIVE
-  - opp-1512000000: ACTIVE
-[+] GPU overclocking steps:
-  - opp-300000000: ACTIVE
-  - opp-400000000: ACTIVE
-  - opp-500000000: MISSING
-  - opp-600000000: ACTIVE
-  - opp-700000000: ACTIVE
-  - opp-800000000: ACTIVE
-[+] RAM overclocking steps:
-  - opp-528000000: ACTIVE
-  - opp-666000000: ACTIVE
-  - opp-786000000: ACTIVE
-  - opp-933000000: ACTIVE
-  - opp-1056000000: ACTIVE
+Target File: rk3326-k36-linux.dtb
+
+[+] Überprüfung der injizierten Hardware-Knoten:
+  - Node 'led': BESTÄTIGT (Gefunden)
+  - Node 'led-vcc': BESTÄTIGT (Gefunden)
+  - Node 'sdio-pwrseq': BESTÄTIGT (Gefunden)
+  - Node 'vcc-led': BESTÄTIGT (Gefunden)
+
+[+] Überprüfung der TeacupX Overclocking-Profile:
+  - Profile 'opp-1300000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-1416000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-1512000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-667000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-700000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-800000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-933000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-1056000000': ANGEWENDET (Aktiv)
+
+[✓] Gegencheck erfolgreich abgeschlossen. Keine Duplikate oder Kollisionen.

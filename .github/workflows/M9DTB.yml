@@ -1,0 +1,403 @@
+name: Build M9 Pro DTB (WiFi + RGB LEDs + OC)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-dtb:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install DTC & Python
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y device-tree-compiler python3 python3-git
+
+      - name: Merge Stock + RGB20S into K36 & Apply OC
+        run: |
+          python3 - << 'EOF'
+          import re, subprocess, os
+
+          # Input DTBs (must exist in repo)
+          STOCK_DTB = "rg32tw3ka.dtb"   # your stock M9 Pro DTB
+          K36_DTB   = "k36.dtb"
+          RGB20S_DTB = "rgb20s.dtb"
+          OUTPUT_DTB = "rk3326-m9-4clones.dtb"
+
+          # ---- Helper functions ----
+
+          def decompile(dtb_path, dts_path):
+              subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f", "-o", dts_path, dtb_path], check=True)
+
+          def build_phandle_map(dts_content):
+              """Return dict {node_name: phandle_string} from the DTS."""
+              pmap = {}
+              for match in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-f]+)>;', dts_content):
+                  ph_val = match.group(1)
+                  text_before = dts_content[:match.start()]
+                  brace_idx = text_before.rfind('{')
+                  if brace_idx != -1:
+                      node_decl = text_before[:brace_idx].strip().split('\n')[-1].strip()
+                      node_name = node_decl.split(':')[-1].strip().split()[0]
+                      pmap[node_name] = ph_val
+              return pmap
+
+          def purge_node(text, node_name):
+              """Remove a node definition from DTS text."""
+              while True:
+                  pattern = r'\n[ \t]*' + re.escape(node_name) + r'(?:@[a-zA-Z0-9_,+-]+)?\s*\{'
+                  match = re.search(pattern, text)
+                  if not match: break
+                  start_idx = match.start()
+                  brace_idx = text.find('{', start_idx)
+                  if brace_idx == -1: break
+                  brace_count = 1
+                  end_idx = -1
+                  for i in range(brace_idx + 1, len(text)):
+                      if text[i] == '{': brace_count += 1
+                      elif text[i] == '}': brace_count -= 1
+                      if brace_count == 0:
+                          end_idx = i + 1
+                          if end_idx < len(text) and text[end_idx] == ';': end_idx += 1
+                          break
+                  if end_idx != -1:
+                      text = text[:start_idx] + text[end_idx:]
+                  else: break
+              return text
+
+          def extract_nodes_by_keywords(dts_content, keywords, exclude_keywords=None):
+              """
+              Return list of (node_name, block) for nodes matching keywords.
+              If exclude_keywords is given, any node whose block contains any of those
+              words (case‑insensitive) is skipped.
+              """
+              if exclude_keywords is None:
+                  exclude_keywords = []
+
+              nodes = []
+              for match in re.finditer(r'^[ \t]*([a-zA-Z0-9_,+-]+)(?:@[a-zA-Z0-9_,+-]+)?\s*\{', dts_content, re.MULTILINE):
+                  node_name = match.group(1)
+                  if not any(kw in node_name.lower() for kw in keywords):
+                      continue
+                  start_idx = match.start()
+                  brace_idx = dts_content.find('{', start_idx)
+                  brace_count = 1
+                  end_idx = -1
+                  for j in range(brace_idx + 1, len(dts_content)):
+                      if dts_content[j] == '{': brace_count += 1
+                      elif dts_content[j] == '}': brace_count -= 1
+                      if brace_count == 0:
+                          end_idx = j + 1
+                          if end_idx < len(dts_content) and dts_content[end_idx] == ';': end_idx += 1
+                          break
+                  if end_idx != -1:
+                      block = dts_content[start_idx:end_idx].strip()
+                      # Check exclusion keywords inside the whole block
+                      exclude = False
+                      for ex in exclude_keywords:
+                          if ex in block.lower():
+                              exclude = True
+                              break
+                      if not exclude:
+                          nodes.append((node_name, block))
+              return nodes
+
+          def inject_nodes(target_dts, source_nodes, source_phandle_map, target_phandle_map, target_dts_content):
+              """Inject source_nodes into target_dts_content with phandle translation."""
+              # Build translation dict: source phandle -> target phandle
+              translation = {}
+              for name, ph in source_phandle_map.items():
+                  if name in target_phandle_map:
+                      translation[ph] = target_phandle_map[name]
+
+              # Renumber internal phandles to avoid collisions
+              target_phandles = set()
+              for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', target_dts_content):
+                  target_phandles.add(int(m.group(1), 16))
+              new_ph_counter = max(target_phandles) + 1 if target_phandles else 0x1000
+
+              internal_ph_map = {}
+              injected_blocks = []
+
+              # Purge any existing nodes with same names
+              for name, _ in source_nodes:
+                  target_dts_content = purge_node(target_dts_content, name)
+
+              for name, block in source_nodes:
+                  # Double-check battery/charge LEDs
+                  if "battery" in name.lower() or "charge" in name.lower():
+                      continue
+
+                  # Translate phandles in the block
+                  for src_ph, tgt_ph in translation.items():
+                      block = re.sub(r'\b' + src_ph + r'\b', tgt_ph, block)
+
+                  # Assign a new internal phandle if the block has one
+                  for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', block):
+                      old_ph = m.group(1).lower()
+                      if old_ph not in internal_ph_map:
+                          internal_ph_map[old_ph] = f"0x{new_ph_counter:x}"
+                          new_ph_counter += 1
+                      block = re.sub(r'\b' + old_ph + r'\b', internal_ph_map[old_ph], block)
+
+                  injected_blocks.append(block)
+
+              if not injected_blocks:
+                  return target_dts_content
+
+              # Insert before the closing root brace
+              last_brace = target_dts_content.rfind("};")
+              if last_brace == -1:
+                  return target_dts_content
+
+              insert = "\n\t/* --- INJECTED NODES --- */\n"
+              for block in injected_blocks:
+                  insert += "\t" + block.replace("\n", "\n\t") + "\n\n"
+              insert += "\t/* --- END INJECTED NODES --- */\n"
+
+              return target_dts_content[:last_brace] + insert + target_dts_content[last_brace:]
+
+          def apply_teacupx_oc(dts_content):
+              """
+              Add a full step‑by‑step CPU, GPU and RAM overclocking ladder.
+              Frequencies are inserted only if they don't already exist.
+              """
+              # --- Helper to insert OPPs into a given OPP table node ---
+              def insert_opps(dts, node_name, opp_list):
+                  """
+                  opp_list: list of (freq_hz, microvolt) tuples.
+                  """
+                  # Locate the OPP table node
+                  pattern = r'\n[ \t]*(' + re.escape(node_name) + r'\s*\{)'
+                  match = re.search(pattern, dts)
+                  if not match:
+                      return dts
+                  start = match.start()
+                  brace_idx = dts.find('{', start)
+                  if brace_idx == -1:
+                      return dts
+                  brace_count = 1
+                  end_idx = -1
+                  for i in range(brace_idx + 1, len(dts)):
+                      if dts[i] == '{': brace_count += 1
+                      elif dts[i] == '}': brace_count -= 1
+                      if brace_count == 0:
+                          end_idx = i + 1
+                          break
+                  if end_idx == -1:
+                      return dts
+
+                  node_content = dts[start:end_idx]
+                  existing_opps = set()
+                  for m in re.finditer(r'opp-hz\s*=\s*<[^>]+>;', node_content):
+                      existing_opps.add(m.group(0))
+
+                  new_entries = []
+                  for freq_hz, volt in opp_list:
+                      freq_hex = f"0x{freq_hz:x}"
+                      opp_hz_line = f"opp-hz = < 0x00 {freq_hex} >;"
+                      if opp_hz_line in existing_opps:
+                          continue
+                      if volt:
+                          opp_entry = f"\t\topp-{freq_hz} {{ {opp_hz_line} opp-microvolt = < {volt} >; }};"
+                      else:
+                          opp_entry = f"\t\topp-{freq_hz} {{ {opp_hz_line} }};"
+                      new_entries.append(opp_entry)
+
+                  if not new_entries:
+                      return dts
+
+                  last_brace = node_content.rfind('}', 0, end_idx - start)
+                  if last_brace == -1:
+                      return dts
+                  insert_pos = start + last_brace
+                  insertion = "\n" + "\n".join(new_entries) + "\n"
+                  return dts[:insert_pos] + insertion + dts[insert_pos:]
+
+              # ---- CPU OPPs ----
+              cpu_opps = [
+                  (1008000000, 1200000),   # 1.008 GHz
+                  (1104000000, 1225000),   # 1.104 GHz
+                  (1200000000, 1250000),   # 1.2 GHz
+                  (1296000000, 1275000),   # 1.296 GHz
+                  (1392000000, 1300000),   # 1.392 GHz
+                  (1488000000, 1325000),   # 1.488 GHz
+                  (1512000000, 1350000),   # 1.512 GHz
+              ]
+              dts_content = insert_opps(dts_content, "cpu0_opp_table", cpu_opps)
+
+              # ---- GPU OPPs ----
+              gpu_opps = [
+                  (300000000, 950000),    # 300 MHz
+                  (400000000, 1000000),   # 400 MHz
+                  (500000000, 1050000),   # 500 MHz
+                  (600000000, 1100000),   # 600 MHz
+                  (700000000, 1150000),   # 700 MHz
+                  (800000000, 1200000),   # 800 MHz
+              ]
+              dts_content = insert_opps(dts_content, "gpu_opp_table", gpu_opps)
+
+              # ---- RAM OPPs ----
+              dmc_opps = [
+                  (528000000, None),      # 528 MHz
+                  (666000000, None),      # 666 MHz
+                  (786000000, None),      # 786 MHz
+                  (933000000, None),      # 933 MHz
+                  (1056000000, None),     # 1056 MHz
+              ]
+              dts_content = insert_opps(dts_content, "dmc_opp_table", dmc_opps)
+
+              return dts_content
+
+          # ---- Main ----
+
+          # 1. Check inputs
+          for f in [STOCK_DTB, K36_DTB, RGB20S_DTB]:
+              if not os.path.exists(f):
+                  print(f"[!] Missing {f}")
+                  exit(1)
+
+          # 2. Decompile all
+          print("[*] Decompiling DTBs...")
+          decompile(STOCK_DTB, "stock.dts")
+          decompile(K36_DTB, "k36.dts")
+          decompile(RGB20S_DTB, "rgb20s.dts")
+
+          with open("k36.dts", "r", encoding="utf-8") as f:
+              base_dts = f.read()
+
+          with open("stock.dts", "r", encoding="utf-8") as f:
+              stock_dts = f.read()
+
+          with open("rgb20s.dts", "r", encoding="utf-8") as f:
+              rgb20s_dts = f.read()
+
+          # 3. Build phandle maps
+          print("[*] Building phandle maps...")
+          stock_map = build_phandle_map(stock_dts)
+          k36_map   = build_phandle_map(base_dts)
+          rgb20s_map = build_phandle_map(rgb20s_dts)
+
+          # 4. Extract RGB LED nodes from stock DTB (joystick rings only)
+          #    - Broad keywords to catch everything related to LEDs.
+          #    - Exclude battery indicator LEDs (blue, red, battery, charge, power, status).
+          print("[*] Extracting RGB LED nodes from stock DTB (excluding battery/charge LEDs)...")
+          led_keywords = ["led", "rgb", "pwm", "light", "vcc-led", "ledvcc", "gpio-leds", "zed", "joystick"]
+          exclude_keywords = ["battery", "charge", "power", "status", "blue", "red"]
+          led_nodes = extract_nodes_by_keywords(stock_dts, led_keywords, exclude_keywords)
+
+          if not led_nodes:
+              print("[!] WARNING: No LED nodes found after filtering. Falling back to all LED nodes (may include battery LED).")
+              led_nodes = extract_nodes_by_keywords(stock_dts, led_keywords)
+
+          # 5. Extract WiFi nodes from RGB20S
+          print("[*] Extracting WiFi nodes from RGB20S DTB...")
+          wifi_keywords = ["wifi", "sdio", "rk915", "wlan", "pwrseq"]
+          wifi_nodes = extract_nodes_by_keywords(rgb20s_dts, wifi_keywords)
+
+          # 6. Inject LED nodes into K36 base
+          print("[*] Injecting LED nodes...")
+          base_dts = inject_nodes(base_dts, led_nodes, stock_map, k36_map, base_dts)
+
+          # 7. Inject WiFi nodes (using updated base_dts with its new phandle map)
+          updated_k36_map = build_phandle_map(base_dts)
+          print("[*] Injecting WiFi nodes...")
+          base_dts = inject_nodes(base_dts, wifi_nodes, rgb20s_map, updated_k36_map, base_dts)
+
+          # 8. Apply OC
+          print("[*] Applying step‑by‑step overclocking...")
+          base_dts = apply_teacupx_oc(base_dts)
+
+          # 9. Write merged DTS and compile
+          with open("merged.dts", "w", encoding="utf-8") as f:
+              f.write(base_dts)
+
+          print("[*] Compiling final DTB...")
+          subprocess.run(["dtc", "-I", "dts", "-O", "dtb", "-f",
+                          "-Wno-unique_unit_address", "-Wno-graph_child_address",
+                          "-o", OUTPUT_DTB, "merged.dts"], check=True)
+
+          # 10. Verification
+          print("[*] Verifying final DTB...")
+          decompile(OUTPUT_DTB, "verify.dts")
+          with open("verify.dts", "r", encoding="utf-8") as f:
+              final_dts = f.read()
+
+          log = []
+          log.append("==================================================")
+          log.append("      M9 PRO DTB PATCH & OVERCLOCK VERIFICATION")
+          log.append("==================================================")
+
+          # Check LED nodes
+          led_names = [n for n, _ in led_nodes]
+          log.append("[+] LED nodes from stock (joystick rings):")
+          for name in led_names:
+              found = name in final_dts
+              log.append(f"  - {name}: {'OK' if found else 'MISSING'}")
+
+          # Check WiFi nodes
+          wifi_names = [n for n, _ in wifi_nodes]
+          log.append("[+] WiFi nodes from RGB20S:")
+          for name in wifi_names:
+              found = name in final_dts
+              log.append(f"  - {name}: {'OK' if found else 'MISSING'}")
+
+          # Check OC frequencies
+          oc_profiles = ["opp-1008000000", "opp-1104000000", "opp-1200000000",
+                         "opp-1296000000", "opp-1392000000", "opp-1488000000",
+                         "opp-1512000000"]
+          gpu_profiles = ["opp-300000000", "opp-400000000", "opp-500000000",
+                          "opp-600000000", "opp-700000000", "opp-800000000"]
+          dmc_profiles = ["opp-528000000", "opp-666000000", "opp-786000000",
+                          "opp-933000000", "opp-1056000000"]
+          log.append("[+] CPU overclocking steps:")
+          for prof in oc_profiles:
+              found = prof in final_dts
+              log.append(f"  - {prof}: {'ACTIVE' if found else 'MISSING'}")
+          log.append("[+] GPU overclocking steps:")
+          for prof in gpu_profiles:
+              found = prof in final_dts
+              log.append(f"  - {prof}: {'ACTIVE' if found else 'MISSING'}")
+          log.append("[+] RAM overclocking steps:")
+          for prof in dmc_profiles:
+              found = prof in final_dts
+              log.append(f"  - {prof}: {'ACTIVE' if found else 'MISSING'}")
+
+          log_text = "\n".join(log)
+          with open("patch_verification.log", "w", encoding="utf-8") as f:
+              f.write(log_text)
+          print(log_text)
+
+          print("[✓] DTB build completed successfully.")
+          EOF
+
+      - name: Upload DTB & Log
+        uses: actions/upload-artifact@v4
+        with:
+          name: m9-pro-dtb
+          path: |
+            rk3326-m9-4clones.dtb
+            patch_verification.log
+          retention-days: 14
+
+      - name: Commit and Push (optional)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add rk3326-m9-4clones.dtb patch_verification.log
+          git diff --quiet && git diff --staged --quiet || (git commit -m "build(dtb): automated M9 Pro DTB merge [skip ci]" && git push)

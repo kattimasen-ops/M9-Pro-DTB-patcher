@@ -32,9 +32,9 @@ jobs:
           import re, subprocess, os
 
           # Input DTBs (must exist in repo)
-          STOCK_DTB = "rg32tw3ka.dtb"   # your stock M9 Pro DTB
-          K36_DTB   = "rk3326-k36-linux.dtb"   # the actual K36 DTB name
-          RGB20S_DTB = "rgb20s.dtb"
+          STOCK_DTB = "rg32tw3ka.dtb"               # your stock M9 Pro DTB
+          K36_DTB   = "rk3326-k36-linux.dtb"        # exact K36 DTB name
+          RGB20S_DTB = "rk3326-rgb20s-linux.dtb"    # exact RGB20S DTB name
           OUTPUT_DTB = "rk3326-m9-4clones.dtb"
 
           # ---- Helper functions ----

@@ -156,46 +156,82 @@ jobs:
               Frequencies are inserted only if they don't already exist.
               Existing disabled OPPs are enabled (remove 'status = "disabled";').
               """
-              # Helper to insert OPPs into a given OPP table node
+              # Helper to insert OPPs into a given OPP table node (robust version)
               def insert_opps(dts, node_name, opp_list):
                   """
                   opp_list: list of (freq_hz, microvolt) tuples.
                   microvolt can be None for RAM (voltage not used).
                   """
-                  # Locate the OPP table node
+                  # Locate the OPP table node using a more reliable method
                   pattern = r'\n[ \t]*(' + re.escape(node_name) + r'\s*\{)'
                   match = re.search(pattern, dts)
                   if not match:
                       return dts
-                  start = match.start()
-                  brace_idx = dts.find('{', start)
-                  if brace_idx == -1:
-                      return dts
+                  node_start = match.start()
+                  # Find the matching closing brace
                   brace_count = 1
-                  end_idx = -1
-                  for i in range(brace_idx + 1, len(dts)):
-                      if dts[i] == '{': brace_count += 1
-                      elif dts[i] == '}': brace_count -= 1
-                      if brace_count == 0:
-                          end_idx = i + 1
-                          break
-                  if end_idx == -1:
+                  idx = dts.find('{', node_start)
+                  if idx == -1:
                       return dts
+                  idx += 1
+                  while idx < len(dts) and brace_count > 0:
+                      if dts[idx] == '{':
+                          brace_count += 1
+                      elif dts[idx] == '}':
+                          brace_count -= 1
+                      idx += 1
+                  if brace_count != 0:
+                      return dts
+                  node_end = idx
+                  node_content = dts[node_start:node_end]
 
-                  node_content = dts[start:end_idx]
                   # Remove any 'status = "disabled";' lines inside the node
-                  node_content = re.sub(r'\n[ \t]*status\s*=\s*"disabled";', '', node_content)
+                  node_content_clean = re.sub(r'\n[ \t]*status\s*=\s*"disabled";', '', node_content)
 
-                  # Find all existing opp-hz lines to avoid duplicates
-                  existing_opps = set()
-                  for m in re.finditer(r'opp-hz\s*=\s*<[^>]+>;', node_content):
-                      existing_opps.add(m.group(0))
+                  # Extract all existing OPP entries as blocks
+                  # We'll find each 'opp-<freq> {' block and extract it
+                  # A more robust way: find all entries that end with '};'
+                  opp_blocks = []
+                  # Regex to find an OPP entry: starts with opp-<freq> { ... };
+                  # We'll scan for 'opp-' and extract the block
+                  pos = 0
+                  while True:
+                      # Find next 'opp-' occurrence
+                      opp_start = node_content_clean.find('\n\t\topp-', pos)
+                      if opp_start == -1:
+                          break
+                      # Find the opening brace after that
+                      brace_idx = node_content_clean.find('{', opp_start)
+                      if brace_idx == -1:
+                          break
+                      # Find matching closing brace
+                      cnt = 1
+                      idx2 = brace_idx + 1
+                      while idx2 < len(node_content_clean) and cnt > 0:
+                          if node_content_clean[idx2] == '{':
+                              cnt += 1
+                          elif node_content_clean[idx2] == '}':
+                              cnt -= 1
+                          idx2 += 1
+                      if cnt != 0:
+                          break
+                      # The entry ends at idx2
+                      entry = node_content_clean[opp_start:idx2].strip()
+                      opp_blocks.append(entry)
+                      pos = idx2
 
+                  # Extract existing opp-hz lines to avoid duplicates
+                  existing_opp_hz = set()
+                  for entry in opp_blocks:
+                      for m in re.finditer(r'opp-hz\s*=\s*<[^>]+>;', entry):
+                          existing_opp_hz.add(m.group(0))
+
+                  # Build new OPP entries that are not already present
                   new_entries = []
                   for freq_hz, volt in opp_list:
                       freq_hex = f"0x{freq_hz:x}"
                       opp_hz_line = f"opp-hz = < 0x00 {freq_hex} >;"
-                      if opp_hz_line in existing_opps:
+                      if opp_hz_line in existing_opp_hz:
                           continue
                       if volt:
                           opp_entry = f"\t\topp-{freq_hz} {{ {opp_hz_line} opp-microvolt = < {volt} >; }};"
@@ -204,23 +240,24 @@ jobs:
                       new_entries.append(opp_entry)
 
                   if not new_entries:
-                      # Still need to update the node content (remove disabled status)
-                      dts = dts[:start] + node_content + dts[end_idx:]
-                      return dts
+                      # Only need to remove disabled status
+                      return dts[:node_start] + node_content_clean + dts[node_end:]
 
-                  # Insert new entries before the closing brace
-                  last_brace = node_content.rfind('}', 0, end_idx - start)
-                  if last_brace == -1:
+                  # Insert new entries before the closing brace of the node
+                  # Find the last '}' before the end
+                  last_brace_pos = node_content_clean.rfind('}')
+                  if last_brace_pos == -1:
                       return dts
-                  insert_pos = start + last_brace
-                  insertion = "\n" + "\n".join(new_entries) + "\n"
-                  # Reconstruct node with removed disabled lines and new entries
-                  new_node = node_content[:last_brace] + insertion + node_content[last_brace:]
-                  return dts[:start] + new_node + dts[end_idx:]
+                  insertion = "\n" + "\n".join(new_entries)
+                  # Insert after the last '}'? Actually we want to insert before the closing brace,
+                  # so we replace the node content with the cleaned content and new entries inserted
+                  # at the position of the last '}'.
+                  new_node_content = node_content_clean[:last_brace_pos] + insertion + node_content_clean[last_brace_pos:]
+                  return dts[:node_start] + new_node_content + dts[node_end:]
 
               # ---- CPU OPPs (frequencies in Hz, voltage in microvolts) ----
               # Stock already has: 1008, 1104, 1200, 1248, 1296, 1416, 1512
-              # We add extra steps: 1392, 1488.
+              # We add extra steps: 1392, 1488, and enable 1512.
               cpu_opps = [
                   (1392000000, 1300000),   # 1.392 GHz
                   (1488000000, 1325000),   # 1.488 GHz

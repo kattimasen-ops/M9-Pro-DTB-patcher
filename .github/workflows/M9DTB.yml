@@ -220,10 +220,10 @@ jobs:
 
               # ---- CPU OPPs (frequencies in Hz, voltage in microvolts) ----
               # Stock already has: 1008, 1104, 1200, 1248, 1296, 1416, 1512
-              # We add extra steps: 1300? Actually 1296 exists, 1392, 1488.
+              # We add extra steps: 1392, 1488.
               cpu_opps = [
-                  (1392000000, 1300000),   # 1.392 GHz (added)
-                  (1488000000, 1325000),   # 1.488 GHz (added)
+                  (1392000000, 1300000),   # 1.392 GHz
+                  (1488000000, 1325000),   # 1.488 GHz
                   (1512000000, 1350000),   # 1.512 GHz (enable existing)
               ]
               dts_content = insert_opps(dts_content, "cpu0_opp_table", cpu_opps)
@@ -348,11 +348,15 @@ jobs:
             patch_verification.log
           retention-days: 14
 
-      - name: Commit and Push (optional)
+      - name: Commit and Push (with pull)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add rk3326-m9-4clones.dtb patch_verification.log
-          git diff --quiet && git diff --staged --quiet || (git commit -m "build(dtb): automated M9 Pro DTB merge [skip ci]" && git push)
+          # Only commit if there are changes
+          git diff --quiet && git diff --staged --quiet || git commit -m "build(dtb): automated M9 Pro DTB merge [skip ci]"
+          # Pull remote changes and rebase local commits on top
+          git pull --rebase origin main
+          git push origin main

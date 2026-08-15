@@ -100,6 +100,60 @@ jobs:
                   return None
               return dts_content[start_idx:end_idx].strip()
 
+          def extract_subnode(dts_content, parent_name, node_name):
+              """Extract a subnode block under a given parent node."""
+              # Find the parent node block
+              parent_block = extract_exact_node(dts_content, parent_name)
+              if not parent_block:
+                  return None
+              # Within the parent block, find the subnode
+              pattern = r'\n[ \t]*' + re.escape(node_name) + r'(?:@[a-zA-Z0-9_,+-]+)?\s*\{'
+              match = re.search(pattern, parent_block)
+              if not match:
+                  return None
+              start_idx = match.start()
+              brace_idx = parent_block.find('{', start_idx)
+              if brace_idx == -1:
+                  return None
+              brace_count = 1
+              end_idx = -1
+              for i in range(brace_idx + 1, len(parent_block)):
+                  if parent_block[i] == '{': brace_count += 1
+                  elif parent_block[i] == '}': brace_count -= 1
+                  if brace_count == 0:
+                      end_idx = i + 1
+                      if end_idx < len(parent_block) and parent_block[end_idx] == ';': end_idx += 1
+                      break
+              if end_idx == -1:
+                  return None
+              return parent_block[start_idx:end_idx].strip()
+
+          def inject_node_into_parent(target_dts, parent_name, node_block):
+              """Insert a node block inside a specific parent node (after its opening brace)."""
+              parent_pattern = r'\n[ \t]*(' + re.escape(parent_name) + r'\s*\{)'
+              match = re.search(parent_pattern, target_dts)
+              if not match:
+                  return target_dts
+              parent_start = match.start()
+              brace_idx = target_dts.find('{', parent_start)
+              if brace_idx == -1:
+                  return target_dts
+              # Find the matching closing brace of the parent
+              brace_count = 1
+              idx = brace_idx + 1
+              while idx < len(target_dts) and brace_count > 0:
+                  if target_dts[idx] == '{':
+                      brace_count += 1
+                  elif target_dts[idx] == '}':
+                      brace_count -= 1
+                  idx += 1
+              if brace_count != 0:
+                  return target_dts
+              parent_end = idx
+              # Insert the node block just before the closing brace of the parent
+              insertion = "\n" + node_block
+              return target_dts[:parent_end-1] + insertion + target_dts[parent_end-1:]
+
           def inject_nodes(target_dts, source_nodes, source_phandle_map, target_phandle_map, target_dts_content):
               """Inject source_nodes (list of (name, block)) into target_dts_content with phandle translation."""
               translation = {}
@@ -133,7 +187,7 @@ jobs:
                           new_ph_counter += 1
                       block = re.sub(r'\b' + old_ph + r'\b', internal_ph_map[old_ph], block)
 
-                  injected_blocks.append(block)
+                  injected_blocks.append((name, block))
 
               if not injected_blocks:
                   return target_dts_content
@@ -144,7 +198,7 @@ jobs:
                   return target_dts_content
 
               insert = "\n\t/* --- INJECTED NODES --- */\n"
-              for block in injected_blocks:
+              for _, block in injected_blocks:
                   insert += "\t" + block.replace("\n", "\n\t") + "\n\n"
               insert += "\t/* --- END INJECTED NODES --- */\n"
 
@@ -156,7 +210,6 @@ jobs:
               Frequencies are inserted only if they don't already exist.
               Existing disabled OPPs are enabled (remove 'status = "disabled";').
               """
-              # Helper to insert OPPs into a given OPP table node (simplified & robust)
               def insert_opps(dts, node_name, opp_list):
                   """
                   opp_list: list of (freq_hz, microvolt) tuples.
@@ -208,7 +261,6 @@ jobs:
                       return dts[:start] + node_content + dts[end:]
 
                   # Insert new entries before the closing brace of the node
-                  # Find the last '}' before the end
                   last_brace_pos = node_content.rfind('}')
                   if last_brace_pos == -1:
                       return dts
@@ -216,9 +268,7 @@ jobs:
                   new_node_content = node_content[:last_brace_pos] + insertion + node_content[last_brace_pos:]
                   return dts[:start] + new_node_content + dts[end:]
 
-              # ---- CPU OPPs (frequencies in Hz, voltage in microvolts) ----
-              # Stock already has: 1008, 1104, 1200, 1248, 1296, 1416, 1512
-              # We add extra steps: 1392, 1488, and enable 1512.
+              # ---- CPU OPPs ----
               cpu_opps = [
                   (1392000000, 1300000),   # 1.392 GHz
                   (1488000000, 1325000),   # 1.488 GHz
@@ -227,7 +277,6 @@ jobs:
               dts_content = insert_opps(dts_content, "cpu0_opp_table", cpu_opps)
 
               # ---- GPU OPPs ----
-              # Stock has up to 520MHz; add 600, 667, 700, 800
               gpu_opps = [
                   (600000000, 1100000),   # 600 MHz
                   (667000000, 1150000),   # 667 MHz
@@ -237,7 +286,6 @@ jobs:
               dts_content = insert_opps(dts_content, "gpu_opp_table", gpu_opps)
 
               # ---- RAM (DMC) OPPs ----
-              # Stock has up to 786MHz; add 933 and 1056
               dmc_opps = [
                   (933000000, None),      # 933 MHz
                   (1056000000, None),     # 1056 MHz
@@ -291,35 +339,61 @@ jobs:
           stock_map = build_phandle_map(stock_dts)
           k36_map   = build_phandle_map(base_dts)
 
-          # 4. Extract the four exact nodes from stock DTB
-          print("[*] Extracting exact nodes: play_joystick, led-vcc, wireless-wlan, sdio-pwrseq...")
-          exact_nodes = ["play_joystick", "led-vcc", "wireless-wlan", "sdio-pwrseq"]
-          source_nodes = []
-          for node in exact_nodes:
+          # 4. Extract root-level nodes to inject (play_joystick, led-vcc, wireless-wlan, sdio-pwrseq)
+          print("[*] Extracting exact root nodes: play_joystick, led-vcc, wireless-wlan, sdio-pwrseq...")
+          root_nodes = ["play_joystick", "led-vcc", "wireless-wlan", "sdio-pwrseq"]
+          source_root_nodes = []
+          for node in root_nodes:
               block = extract_exact_node(stock_dts, node)
               if block:
-                  source_nodes.append((node, block))
-                  print(f"[+] Found node: {node}")
+                  source_root_nodes.append((node, block))
+                  print(f"[+] Found root node: {node}")
               else:
-                  print(f"[!] WARNING: Node '{node}' not found in stock DTB!")
+                  print(f"[!] WARNING: Root node '{node}' not found in stock DTB!")
 
-          if not source_nodes:
-              print("[!] No nodes to inject. Aborting.")
-              exit(1)
+          # 5. Extract subnodes: battery and charger from pmic@20
+          print("[*] Extracting subnodes: battery and charger from pmic@20...")
+          # First, find the pmic@20 node in stock DTS
+          pmic_node = extract_exact_node(stock_dts, "pmic@20")
+          if not pmic_node:
+              print("[!] WARNING: pmic@20 node not found in stock DTB!")
+          else:
+              # Extract battery subnode
+              battery_block = extract_subnode(stock_dts, "pmic@20", "battery")
+              if battery_block:
+                  print("[+] Found battery subnode")
+              else:
+                  print("[!] WARNING: battery subnode not found under pmic@20!")
+              # Extract charger subnode
+              charger_block = extract_subnode(stock_dts, "pmic@20", "charger")
+              if charger_block:
+                  print("[+] Found charger subnode")
+              else:
+                  print("[!] WARNING: charger subnode not found under pmic@20!")
 
-          # 5. Inject nodes into K36 base
-          print("[*] Injecting nodes...")
-          base_dts = inject_nodes(base_dts, source_nodes, stock_map, k36_map, base_dts)
+          # 6. Inject root nodes into K36 base
+          print("[*] Injecting root nodes...")
+          base_dts = inject_nodes(base_dts, source_root_nodes, stock_map, k36_map, base_dts)
 
-          # 6. Apply overclocking
+          # 7. Inject battery and charger subnodes into pmic@20 in K36 base
+          # First, ensure pmic@20 exists in K36, or we need to find it.
+          # We'll assume it exists. We'll inject the subnodes into it.
+          if battery_block:
+              print("[*] Injecting battery subnode into pmic@20...")
+              base_dts = inject_node_into_parent(base_dts, "pmic@20", battery_block)
+          if charger_block:
+              print("[*] Injecting charger subnode into pmic@20...")
+              base_dts = inject_node_into_parent(base_dts, "pmic@20", charger_block)
+
+          # 8. Apply overclocking
           print("[*] Applying step‑by‑step overclocking...")
           base_dts = apply_teacupx_oc(base_dts)
 
-          # 7. Patch battery capacity to 3200mAh
+          # 9. Patch battery capacity to 3200mAh
           print("[*] Patching battery capacity to 3200mAh (design_capacity = 0x0C80)...")
           base_dts = patch_battery_capacity(base_dts)
 
-          # 8. Write merged DTS and compile
+          # 10. Write merged DTS and compile
           with open("merged.dts", "w", encoding="utf-8") as f:
               f.write(base_dts)
 
@@ -328,7 +402,7 @@ jobs:
                           "-Wno-unique_unit_address", "-Wno-graph_child_address",
                           "-o", OUTPUT_DTB, "merged.dts"], check=True)
 
-          # 9. Verification
+          # 11. Verification
           print("[*] Verifying final DTB...")
           decompile(OUTPUT_DTB, "verify.dts")
           with open("verify.dts", "r", encoding="utf-8") as f:
@@ -341,9 +415,15 @@ jobs:
 
           # Check injected nodes
           log.append("[+] Injected nodes:")
-          for name, _ in source_nodes:
+          for name, _ in source_root_nodes:
               found = name in final_dts
               log.append(f"  - {name}: {'OK' if found else 'MISSING'}")
+          if battery_block:
+              found = "battery" in final_dts
+              log.append(f"  - battery subnode: {'OK' if found else 'MISSING'}")
+          if charger_block:
+              found = "charger" in final_dts
+              log.append(f"  - charger subnode: {'OK' if found else 'MISSING'}")
 
           # Check OC frequencies
           log.append("[+] Overclocking profiles:")

@@ -9,7 +9,7 @@
   - battery subnode: OK
   - charger subnode: OK
 [+] Overclocking profiles:
-  - opp-1392000000: MISSING
+  - opp-1392000000: ACTIVE
   - opp-1488000000: ACTIVE
   - opp-1512000000: ACTIVE
   - opp-600000000: ACTIVE

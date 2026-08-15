@@ -31,9 +31,9 @@ jobs:
           python3 - << 'EOF'
           import re, subprocess, os
 
-          # Input DTBs (must exist in repo)
-          STOCK_DTB = "rg32tw3ka.dtb"           # your stock EmuELEC DTB
-          K36_DTB   = "rk3326-k36-linux.dtb"   # ArkOS4Clones K36 DTB
+          # Input DTBs
+          STOCK_DTB = "rg32tw3ka.dtb"          
+          K36_DTB   = "rk3326-k36-linux.dtb"   
           OUTPUT_DTB = "rk3326-m9-4clones.dtb"
 
           # ---- Helper functions ----
@@ -44,7 +44,7 @@ jobs:
           def build_phandle_map(dts_content):
               """Return dict {node_name: phandle_string} from the DTS."""
               pmap = {}
-              for match in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-f]+)>;', dts_content):
+              for match in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', dts_content):
                   ph_val = match.group(1)
                   text_before = dts_content[:match.start()]
                   brace_idx = text_before.rfind('{')
@@ -54,303 +54,159 @@ jobs:
                       pmap[node_name] = ph_val
               return pmap
 
-          def purge_node(text, node_name):
-              """Remove a node definition from DTS text."""
-              while True:
-                  pattern = r'\n[ \t]*' + re.escape(node_name) + r'(?:@[a-zA-Z0-9_,+-]+)?\s*\{'
-                  match = re.search(pattern, text)
-                  if not match: break
-                  start_idx = match.start()
-                  brace_idx = text.find('{', start_idx)
-                  if brace_idx == -1: break
-                  brace_count = 1
-                  end_idx = -1
-                  for i in range(brace_idx + 1, len(text)):
-                      if text[i] == '{': brace_count += 1
-                      elif text[i] == '}': brace_count -= 1
-                      if brace_count == 0:
-                          end_idx = i + 1
-                          if end_idx < len(text) and text[end_idx] == ';': end_idx += 1
-                          break
-                  if end_idx != -1:
-                      text = text[:start_idx] + text[end_idx:]
-                  else: break
-              return text
-
-          def extract_exact_node(dts_content, node_name):
-              """Extract the complete block for a given node name (root-level)."""
-              pattern = r'\n[ \t]*' + re.escape(node_name) + r'(?:@[a-zA-Z0-9_,+-]+)?\s*\{'
-              match = re.search(pattern, dts_content)
+          def find_node_boundaries(dts_content, node_name):
+              """Find exact start and end string indices for a node block."""
+              pattern = re.compile(r'(?:^[ \t]*|[ \t]+)([a-zA-Z0-9_-]+:\s*)?' + re.escape(node_name) + r'(?:@[a-zA-Z0-9_,+-]+)?\s*\{', re.MULTILINE)
+              match = pattern.search(dts_content)
               if not match:
-                  return None
+                  return None, None
               start_idx = match.start()
               brace_idx = dts_content.find('{', start_idx)
-              if brace_idx == -1:
-                  return None
               brace_count = 1
-              end_idx = -1
               for i in range(brace_idx + 1, len(dts_content)):
                   if dts_content[i] == '{': brace_count += 1
                   elif dts_content[i] == '}': brace_count -= 1
                   if brace_count == 0:
                       end_idx = i + 1
-                      if end_idx < len(dts_content) and dts_content[end_idx] == ';': end_idx += 1
-                      break
-              if end_idx == -1:
-                  return None
-              return dts_content[start_idx:end_idx].strip()
+                      if end_idx < len(dts_content) and dts_content[end_idx] == ';': 
+                          end_idx += 1
+                      return start_idx, end_idx
+              return None, None
+
+          def extract_exact_node(dts_content, node_name):
+              start, end = find_node_boundaries(dts_content, node_name)
+              if start is not None and end is not None:
+                  return dts_content[start:end].strip()
+              return None
 
           def extract_subnode(dts_content, parent_name, node_name):
-              """Extract a subnode block under a given parent node."""
-              # Find the parent node block
-              parent_block = extract_exact_node(dts_content, parent_name)
-              if not parent_block:
-                  return None
-              # Within the parent block, find the subnode
-              pattern = r'\n[ \t]*' + re.escape(node_name) + r'(?:@[a-zA-Z0-9_,+-]+)?\s*\{'
-              match = re.search(pattern, parent_block)
-              if not match:
-                  return None
-              start_idx = match.start()
-              brace_idx = parent_block.find('{', start_idx)
-              if brace_idx == -1:
-                  return None
-              brace_count = 1
-              end_idx = -1
-              for i in range(brace_idx + 1, len(parent_block)):
-                  if parent_block[i] == '{': brace_count += 1
-                  elif parent_block[i] == '}': brace_count -= 1
-                  if brace_count == 0:
-                      end_idx = i + 1
-                      if end_idx < len(parent_block) and parent_block[end_idx] == ';': end_idx += 1
-                      break
-              if end_idx == -1:
-                  return None
-              return parent_block[start_idx:end_idx].strip()
+              p_start, p_end = find_node_boundaries(dts_content, parent_name)
+              if p_start is None: return None
+              parent_block = dts_content[p_start:p_end]
+              s_start, s_end = find_node_boundaries(parent_block, node_name)
+              if s_start is None: return None
+              return parent_block[s_start:s_end].strip()
 
-          def inject_node_into_parent(target_dts, parent_name, node_block):
-              """Insert a node block inside a specific parent node (after its opening brace)."""
-              parent_pattern = r'\n[ \t]*(' + re.escape(parent_name) + r'\s*\{)'
-              match = re.search(parent_pattern, target_dts)
-              if not match:
-                  return target_dts
-              parent_start = match.start()
-              brace_idx = target_dts.find('{', parent_start)
-              if brace_idx == -1:
-                  return target_dts
-              # Find the matching closing brace of the parent
-              brace_count = 1
-              idx = brace_idx + 1
-              while idx < len(target_dts) and brace_count > 0:
-                  if target_dts[idx] == '{':
-                      brace_count += 1
-                  elif target_dts[idx] == '}':
-                      brace_count -= 1
-                  idx += 1
-              if brace_count != 0:
-                  return target_dts
-              parent_end = idx
-              # Insert the node block just before the closing brace of the parent
-              insertion = "\n" + node_block
-              return target_dts[:parent_end-1] + insertion + target_dts[parent_end-1:]
+          def purge_node(text, node_name):
+              """Remove all occurrences of a node from DTS text."""
+              while True:
+                  start, end = find_node_boundaries(text, node_name)
+                  if start is None: break
+                  text = text[:start] + text[end:]
+              return text
 
-          def inject_nodes(target_dts, source_nodes, source_phandle_map, target_phandle_map, target_dts_content):
-              """Inject source_nodes (list of (name, block)) into target_dts_content with phandle translation."""
-              translation = {}
-              for name, ph in source_phandle_map.items():
-                  if name in target_phandle_map:
-                      translation[ph] = target_phandle_map[name]
-
-              # Renumber internal phandles to avoid collisions
-              target_phandles = set()
-              for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', target_dts_content):
-                  target_phandles.add(int(m.group(1), 16))
+          def inject_root_nodes(target_dts, source_nodes, source_phandle_map, target_phandle_map):
+              translation = {ph: target_phandle_map[n] for n, ph in source_phandle_map.items() if n in target_phandle_map}
+              
+              target_phandles = set(int(m.group(1), 16) for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', target_dts))
               new_ph_counter = max(target_phandles) + 1 if target_phandles else 0x1000
 
               internal_ph_map = {}
               injected_blocks = []
 
-              # Purge any existing nodes with same names
-              for name, _ in source_nodes:
-                  target_dts_content = purge_node(target_dts_content, name)
-
               for name, block in source_nodes:
-                  # Translate phandles in the block
+                  target_dts = purge_node(target_dts, name)
                   for src_ph, tgt_ph in translation.items():
                       block = re.sub(r'\b' + src_ph + r'\b', tgt_ph, block)
-
-                  # Assign a new internal phandle if the block has one
                   for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', block):
                       old_ph = m.group(1).lower()
                       if old_ph not in internal_ph_map:
                           internal_ph_map[old_ph] = f"0x{new_ph_counter:x}"
                           new_ph_counter += 1
                       block = re.sub(r'\b' + old_ph + r'\b', internal_ph_map[old_ph], block)
+                  injected_blocks.append(block)
 
-                  injected_blocks.append((name, block))
+              if not injected_blocks: return target_dts
+              
+              last_brace = target_dts.rfind("};")
+              if last_brace == -1: return target_dts
 
-              if not injected_blocks:
-                  return target_dts_content
-
-              # Insert before the closing root brace
-              last_brace = target_dts_content.rfind("};")
-              if last_brace == -1:
-                  return target_dts_content
-
-              insert = "\n\t/* --- INJECTED NODES --- */\n"
-              for _, block in injected_blocks:
+              insert = "\n\t/* --- INJECTED ROOT NODES --- */\n"
+              for block in injected_blocks:
                   insert += "\t" + block.replace("\n", "\n\t") + "\n\n"
-              insert += "\t/* --- END INJECTED NODES --- */\n"
+              insert += "\t/* --- END INJECTED ROOT NODES --- */\n"
+              
+              return target_dts[:last_brace] + insert + target_dts[last_brace:]
 
-              return target_dts_content[:last_brace] + insert + target_dts_content[last_brace:]
+          def inject_node_into_parent(target_dts, parent_name, node_block):
+              p_start, p_end = find_node_boundaries(target_dts, parent_name)
+              if p_start is None: return target_dts
+              parent_block = target_dts[p_start:p_end]
+              last_brace = parent_block.rfind('}')
+              if last_brace == -1: return target_dts
+              
+              new_parent_block = parent_block[:last_brace] + "\t" + node_block.replace("\n", "\n\t") + "\n" + parent_block[last_brace:]
+              return target_dts[:p_start] + new_parent_block + target_dts[p_end:]
+
+          def patch_battery_block(battery_block):
+              """Replace design_capacity and design_qmax values with 3200mAh (<0x0C80>)."""
+              patched = re.sub(r'design_capacity\s*=\s*<0x[0-9a-fA-F]+>;', 'design_capacity = <0x0C80>;', battery_block)
+              patched = re.sub(r'design_qmax\s*=\s*<0x[0-9a-fA-F]+>;', 'design_qmax = <0x0C80>;', patched)
+              return patched
 
           def apply_teacupx_oc(dts_content):
-              """
-              Add a full step‑by‑step CPU, GPU and RAM overclocking ladder.
-              Handles both 'cpu0_opp_table' and 'cpu0-opp-table' naming.
-              """
-              # Helper to insert OPPs into a given OPP table node (robust)
-              def insert_opps(dts, node_name, opp_list):
-                  """
-                  opp_list: list of (freq_hz, microvolt) tuples.
-                  microvolt can be None for RAM (voltage not used).
-                  """
-                  # Try both underscore and hyphen variants
-                  possible_names = [node_name, node_name.replace('_', '-'), node_name.replace('-', '_')]
-                  found_node = None
+              def insert_opps(dts, possible_names, opp_list):
                   for name in possible_names:
-                      pattern = r'\n[ \t]*(' + re.escape(name) + r'\s*\{)'
-                      match = re.search(pattern, dts)
-                      if match:
-                          found_node = (name, match)
-                          break
-                  if not found_node:
-                      return dts
-                  node_name, match = found_node
-                  start = match.start()
-                  # Find the matching closing brace
-                  brace_count = 1
-                  idx = dts.find('{', start) + 1
-                  while idx < len(dts) and brace_count > 0:
-                      if dts[idx] == '{':
-                          brace_count += 1
-                      elif dts[idx] == '}':
-                          brace_count -= 1
-                      idx += 1
-                  if brace_count != 0:
-                      return dts
-                  end = idx
+                      start, end = find_node_boundaries(dts, name)
+                      if start is not None: break
+                  else:
+                      return dts 
+
                   node_content = dts[start:end]
+                  # 1. Bruteforce strip all "disabled" statuses inside the table block
+                  node_content = re.sub(r'status\s*=\s*"disabled"\s*;', '', node_content)
 
-                  # Remove 'status = "disabled";' lines
-                  node_content = re.sub(r'\n[ \t]*status\s*=\s*"disabled";', '', node_content)
-
-                  # Extract existing opp-hz lines to avoid duplicates
-                  existing_opp_hz = set()
-                  for m in re.finditer(r'opp-hz\s*=\s*<[^>]+>;', node_content):
-                      existing_opp_hz.add(m.group(0))
-
-                  # Build new OPP entries that are not already present
+                  # 2. Append missing OPP entries
                   new_entries = []
                   for freq_hz, volt in opp_list:
                       freq_hex = f"0x{freq_hz:x}"
-                      opp_hz_line = f"opp-hz = < 0x00 {freq_hex} >;"
-                      if opp_hz_line in existing_opp_hz:
+                      # If the node name already exists, skip appending it
+                      if f"opp-{freq_hz}" in node_content:
                           continue
+                      
+                      opp_hz_line = f"opp-hz = <0x00 {freq_hex}>;"
                       if volt:
-                          opp_entry = f"\t\topp-{freq_hz} {{ {opp_hz_line} opp-microvolt = < {volt} >; }};"
+                          opp_entry = f"\t\topp-{freq_hz} {{\n\t\t\t{opp_hz_line}\n\t\t\topp-microvolt = <{volt}>;\n\t\t}};"
                       else:
-                          opp_entry = f"\t\topp-{freq_hz} {{ {opp_hz_line} }};"
+                          opp_entry = f"\t\topp-{freq_hz} {{\n\t\t\t{opp_hz_line}\n\t\t}};"
                       new_entries.append(opp_entry)
 
-                  if not new_entries:
-                      # Only need to update node content (remove disabled lines)
-                      return dts[:start] + node_content + dts[end:]
+                  if new_entries:
+                      last_brace = node_content.rfind('}')
+                      insertion = "\n" + "\n".join(new_entries) + "\n"
+                      node_content = node_content[:last_brace] + insertion + node_content[last_brace:]
 
-                  # Insert new entries before the closing brace of the node
-                  last_brace_pos = node_content.rfind('}')
-                  if last_brace_pos == -1:
-                      return dts
-                  insertion = "\n" + "\n".join(new_entries)
-                  new_node_content = node_content[:last_brace_pos] + insertion + node_content[last_brace_pos:]
-                  return dts[:start] + new_node_content + dts[end:]
+                  return dts[:start] + node_content + dts[end:]
 
-              # ---- CPU OPPs ----
-              cpu_opps = [
-                  (1392000000, 1300000),   # 1.392 GHz
-                  (1488000000, 1325000),   # 1.488 GHz
-                  (1512000000, 1350000),   # 1.512 GHz (enable existing)
-              ]
-              dts_content = insert_opps(dts_content, "cpu0_opp_table", cpu_opps)
+              cpu_opps = [(1392000000, 1300000), (1488000000, 1325000), (1512000000, 1350000)]
+              dts_content = insert_opps(dts_content, ["cpu0_opp_table", "cpu0-opp-table", "opp-table0"], cpu_opps)
 
-              # ---- GPU OPPs ----
-              gpu_opps = [
-                  (600000000, 1100000),   # 600 MHz
-                  (667000000, 1150000),   # 667 MHz
-                  (700000000, 1200000),   # 700 MHz
-                  (800000000, 1250000),   # 800 MHz
-              ]
-              dts_content = insert_opps(dts_content, "gpu_opp_table", gpu_opps)
+              gpu_opps = [(600000000, 1100000), (667000000, 1150000), (700000000, 1200000), (800000000, 1250000)]
+              dts_content = insert_opps(dts_content, ["gpu_opp_table", "gpu-opp-table", "opp-table2"], gpu_opps)
 
-              # ---- RAM (DMC) OPPs ----
-              dmc_opps = [
-                  (933000000, None),      # 933 MHz
-                  (1056000000, None),     # 1056 MHz
-              ]
-              dts_content = insert_opps(dts_content, "dmc_opp_table", dmc_opps)
+              dmc_opps = [(933000000, None), (1056000000, None)]
+              dts_content = insert_opps(dts_content, ["dmc_opp_table", "dmc-opp-table"], dmc_opps)
 
               return dts_content
 
-          def patch_battery_capacity(dts_content):
-              """
-              Update battery design_capacity and design_qmax to 3200mAh (0x0C80).
-              Directly replaces the lines within the 'battery' subnode.
-              """
-              # Find the battery subnode and replace the values inside it
-              # We'll locate the 'battery {' block and then the specific lines.
-              battery_block = extract_subnode(dts_content, "pmic@20", "battery")
-              if not battery_block:
-                  return dts_content
-              # Replace the values inside the block
-              new_block = re.sub(
-                  r'(design_capacity\s*=\s*)<0x[0-9a-fA-F]+>;',
-                  r'\1<0x0C80>;',
-                  battery_block
-              )
-              new_block = re.sub(
-                  r'(design_qmax\s*=\s*)<0x[0-9a-fA-F]+>;',
-                  r'\1<0x0C80>;',
-                  new_block
-              )
-              # Replace the old block with the new block in the whole DTS
-              return dts_content.replace(battery_block, new_block)
-
-          # ---- Main ----
-
-          # 1. Check inputs
+          # ---- Main Execution ----
           for f in [STOCK_DTB, K36_DTB]:
               if not os.path.exists(f):
                   print(f"[!] Missing {f}")
                   exit(1)
 
-          # 2. Decompile all
           print("[*] Decompiling DTBs...")
           decompile(STOCK_DTB, "stock.dts")
           decompile(K36_DTB, "k36.dts")
 
-          with open("k36.dts", "r", encoding="utf-8") as f:
-              base_dts = f.read()
+          with open("k36.dts", "r", encoding="utf-8") as f: base_dts = f.read()
+          with open("stock.dts", "r", encoding="utf-8") as f: stock_dts = f.read()
 
-          with open("stock.dts", "r", encoding="utf-8") as f:
-              stock_dts = f.read()
-
-          # 3. Build phandle maps
           print("[*] Building phandle maps...")
           stock_map = build_phandle_map(stock_dts)
           k36_map   = build_phandle_map(base_dts)
 
-          # 4. Extract root-level nodes to inject (play_joystick, led-vcc, wireless-wlan, sdio-pwrseq)
-          print("[*] Extracting exact root nodes: play_joystick, led-vcc, wireless-wlan, sdio-pwrseq...")
+          print("[*] Extracting root nodes...")
           root_nodes = ["play_joystick", "led-vcc", "wireless-wlan", "sdio-pwrseq"]
           source_root_nodes = []
           for node in root_nodes:
@@ -361,47 +217,35 @@ jobs:
               else:
                   print(f"[!] WARNING: Root node '{node}' not found in stock DTB!")
 
-          # 5. Extract subnodes: battery and charger from pmic@20
-          print("[*] Extracting subnodes: battery and charger from pmic@20...")
-          # First, find the pmic@20 node in stock DTS
-          pmic_node = extract_exact_node(stock_dts, "pmic@20")
-          if not pmic_node:
-              print("[!] WARNING: pmic@20 node not found in stock DTB!")
-          else:
-              # Extract battery subnode
-              battery_block = extract_subnode(stock_dts, "pmic@20", "battery")
-              if battery_block:
-                  print("[+] Found battery subnode")
-              else:
-                  print("[!] WARNING: battery subnode not found under pmic@20!")
-              # Extract charger subnode
-              charger_block = extract_subnode(stock_dts, "pmic@20", "charger")
-              if charger_block:
-                  print("[+] Found charger subnode")
-              else:
-                  print("[!] WARNING: charger subnode not found under pmic@20!")
+          print("[*] Extracting and patching pmic subnodes...")
+          battery_block = extract_subnode(stock_dts, "pmic@20", "battery")
+          charger_block = extract_subnode(stock_dts, "pmic@20", "charger")
 
-          # 6. Inject root nodes into K36 base
-          print("[*] Injecting root nodes...")
-          base_dts = inject_nodes(base_dts, source_root_nodes, stock_map, k36_map, base_dts)
-
-          # 7. Inject battery and charger subnodes into pmic@20 in K36 base
           if battery_block:
-              print("[*] Injecting battery subnode into pmic@20...")
+              print("[+] Found battery subnode. Patching capacity to 3200mAh (0x0C80)...")
+              battery_block = patch_battery_block(battery_block)
+
+          print("[*] Injecting root nodes...")
+          base_dts = inject_root_nodes(base_dts, source_root_nodes, stock_map, k36_map)
+
+          print("[*] Cleaning up and injecting pmic subnodes...")
+          p_start, p_end = find_node_boundaries(base_dts, "pmic@20")
+          if p_start is not None:
+              pmic_block = base_dts[p_start:p_end]
+              pmic_block = purge_node(pmic_block, "battery")
+              pmic_block = purge_node(pmic_block, "charger")
+              base_dts = base_dts[:p_start] + pmic_block + base_dts[p_end:]
+
+          if battery_block:
+              print("[*] Injecting patched battery subnode into pmic@20...")
               base_dts = inject_node_into_parent(base_dts, "pmic@20", battery_block)
           if charger_block:
               print("[*] Injecting charger subnode into pmic@20...")
               base_dts = inject_node_into_parent(base_dts, "pmic@20", charger_block)
 
-          # 8. Apply overclocking
-          print("[*] Applying step‑by‑step overclocking...")
+          print("[*] Applying overclocking...")
           base_dts = apply_teacupx_oc(base_dts)
 
-          # 9. Patch battery capacity to 3200mAh
-          print("[*] Patching battery capacity to 3200mAh (design_capacity = 0x0C80)...")
-          base_dts = patch_battery_capacity(base_dts)
-
-          # 10. Write merged DTS and compile
           with open("merged.dts", "w", encoding="utf-8") as f:
               f.write(base_dts)
 
@@ -410,50 +254,36 @@ jobs:
                           "-Wno-unique_unit_address", "-Wno-graph_child_address",
                           "-o", OUTPUT_DTB, "merged.dts"], check=True)
 
-          # 11. Verification
+          # Verification Check
           print("[*] Verifying final DTB...")
           decompile(OUTPUT_DTB, "verify.dts")
-          with open("verify.dts", "r", encoding="utf-8") as f:
-              final_dts = f.read()
+          with open("verify.dts", "r", encoding="utf-8") as f: final_dts = f.read()
 
-          log = []
-          log.append("==================================================")
-          log.append("      M9 PRO DTB PATCH & OVERCLOCK VERIFICATION")
-          log.append("==================================================")
-
-          # Check injected nodes
-          log.append("[+] Injected nodes:")
+          log = ["==================================================",
+                 "      M9 PRO DTB PATCH & OVERCLOCK VERIFICATION",
+                 "==================================================",
+                 "[+] Injected nodes:"]
           for name, _ in source_root_nodes:
-              found = name in final_dts
-              log.append(f"  - {name}: {'OK' if found else 'MISSING'}")
-          if battery_block:
-              found = "battery" in final_dts
-              log.append(f"  - battery subnode: {'OK' if found else 'MISSING'}")
-          if charger_block:
-              found = "charger" in final_dts
-              log.append(f"  - charger subnode: {'OK' if found else 'MISSING'}")
+              log.append(f"  - {name}: {'OK' if name in final_dts else 'MISSING'}")
+          if battery_block: log.append(f"  - battery subnode: {'OK' if 'battery' in final_dts else 'MISSING'}")
+          if charger_block: log.append(f"  - charger subnode: {'OK' if 'charger' in final_dts else 'MISSING'}")
 
-          # Check OC frequencies
           log.append("[+] Overclocking profiles:")
           cpu_check = ["opp-1392000000", "opp-1488000000", "opp-1512000000"]
           gpu_check = ["opp-600000000", "opp-667000000", "opp-700000000", "opp-800000000"]
           dmc_check = ["opp-933000000", "opp-1056000000"]
           for prof in cpu_check + gpu_check + dmc_check:
-              found = prof in final_dts
-              log.append(f"  - {prof}: {'ACTIVE' if found else 'MISSING'}")
+              log.append(f"  - {prof}: {'ACTIVE' if prof in final_dts else 'MISSING'}")
 
-          # Check battery capacity
           log.append("[+] Battery capacity:")
-          cap_found = re.search(r'design_capacity\s*=\s*<0x0C80>;', final_dts)
-          qmax_found = re.search(r'design_qmax\s*=\s*<0x0C80>;', final_dts)
+          cap_found = re.search(r'design_capacity\s*=\s*<0x0*[cC]80>;', final_dts)
+          qmax_found = re.search(r'design_qmax\s*=\s*<0x0*[cC]80>;', final_dts)
           log.append(f"  - design_capacity: {'OK (3200mAh)' if cap_found else 'MISSING'}")
-          log.append(f"  - design_qmax: {'OK (3200mAh)' if qmax_found else 'MISSING'}")
+          log.append(f"  - design_qmax:     {'OK (3200mAh)' if qmax_found else 'MISSING'}")
 
           log_text = "\n".join(log)
-          with open("patch_verification.log", "w", encoding="utf-8") as f:
-              f.write(log_text)
+          with open("patch_verification.log", "w", encoding="utf-8") as f: f.write(log_text)
           print(log_text)
-
           print("[✓] DTB build completed successfully.")
           EOF
 

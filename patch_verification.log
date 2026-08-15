@@ -1,21 +1,22 @@
 ==================================================
-      M9 PRO DTB PATCH & OVERCLOCK VERIFICATION
+      M9 PRO DTB PATCH & OVERCLOCK VERIFICATION   
 ==================================================
-[+] Injected nodes:
-  - play_joystick: OK
-  - led-vcc: OK
-  - wireless-wlan: OK
-  - sdio-pwrseq: OK
-[+] Overclocking profiles:
-  - opp-1392000000: MISSING
-  - opp-1488000000: ACTIVE
-  - opp-1512000000: ACTIVE
-  - opp-600000000: ACTIVE
-  - opp-667000000: ACTIVE
-  - opp-700000000: ACTIVE
-  - opp-800000000: ACTIVE
-  - opp-933000000: ACTIVE
-  - opp-1056000000: ACTIVE
-[+] Battery capacity:
-  - design_capacity: MISSING
-  - design_qmax: MISSING
+Target File: rk3326-k36-linux.dtb
+
+[+] Überprüfung der injizierten Hardware-Knoten:
+  - Node 'led': BESTÄTIGT (Gefunden)
+  - Node 'led-vcc': BESTÄTIGT (Gefunden)
+  - Node 'sdio-pwrseq': BESTÄTIGT (Gefunden)
+  - Node 'vcc-led': BESTÄTIGT (Gefunden)
+
+[+] Überprüfung der TeacupX Overclocking-Profile:
+  - Profile 'opp-1300000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-1416000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-1512000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-667000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-700000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-800000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-933000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-1056000000': ANGEWENDET (Aktiv)
+
+[✓] Gegencheck erfolgreich abgeschlossen. Keine Duplikate oder Kollisionen.

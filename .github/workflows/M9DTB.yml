@@ -156,14 +156,14 @@ jobs:
               Frequencies are inserted only if they don't already exist.
               Existing disabled OPPs are enabled (remove 'status = "disabled";').
               """
-              # Helper to insert OPPs into a given OPP table node (robust version)
+              # Helper to insert OPPs into a given OPP table node (simplified & robust)
               def insert_opps(dts, node_name, opp_list):
                   """
                   opp_list: list of (freq_hz, microvolt) tuples.
                   microvolt can be None for RAM (voltage not used).
                   """
-                  # Locate the OPP table node by searching for 'node_name {'
-                  pattern = r'\n[ \t]*' + re.escape(node_name) + r'\s*\{'
+                  # Find the OPP table node
+                  pattern = r'\n[ \t]*(' + re.escape(node_name) + r'\s*\{)'
                   match = re.search(pattern, dts)
                   if not match:
                       return dts
@@ -182,12 +182,12 @@ jobs:
                   end = idx
                   node_content = dts[start:end]
 
-                  # Remove any 'status = "disabled";' lines inside the node
-                  node_content_clean = re.sub(r'\n[ \t]*status\s*=\s*"disabled";', '', node_content)
+                  # Remove 'status = "disabled";' lines
+                  node_content = re.sub(r'\n[ \t]*status\s*=\s*"disabled";', '', node_content)
 
                   # Extract existing opp-hz lines to avoid duplicates
                   existing_opp_hz = set()
-                  for m in re.finditer(r'opp-hz\s*=\s*<[^>]+>;', node_content_clean):
+                  for m in re.finditer(r'opp-hz\s*=\s*<[^>]+>;', node_content):
                       existing_opp_hz.add(m.group(0))
 
                   # Build new OPP entries that are not already present
@@ -204,16 +204,16 @@ jobs:
                       new_entries.append(opp_entry)
 
                   if not new_entries:
-                      # Only need to remove disabled status
-                      return dts[:start] + node_content_clean + dts[end:]
+                      # Only need to update node content (remove disabled lines)
+                      return dts[:start] + node_content + dts[end:]
 
                   # Insert new entries before the closing brace of the node
                   # Find the last '}' before the end
-                  last_brace_pos = node_content_clean.rfind('}')
+                  last_brace_pos = node_content.rfind('}')
                   if last_brace_pos == -1:
                       return dts
                   insertion = "\n" + "\n".join(new_entries)
-                  new_node_content = node_content_clean[:last_brace_pos] + insertion + node_content_clean[last_brace_pos:]
+                  new_node_content = node_content[:last_brace_pos] + insertion + node_content[last_brace_pos:]
                   return dts[:start] + new_node_content + dts[end:]
 
               # ---- CPU OPPs (frequencies in Hz, voltage in microvolts) ----
@@ -249,15 +249,16 @@ jobs:
           def patch_battery_capacity(dts_content):
               """
               Update battery design_capacity and design_qmax to 3200mAh (0x0C80).
-              Fix: match hex values with any number of leading zeros.
+              Uses a more robust regex that matches any hex value and only replaces if the old value matches the stock ones.
               """
-              # Use regex that allows optional leading zeros: 0x0*0b10 and 0x0*0c2b
+              # Replace design_capacity if it currently is 0x0B10 (or 0x0b10 with leading zeros)
               dts_content = re.sub(
                   r'(design_capacity\s*=\s*)<0x0*0b10>;',
                   r'\1<0x0C80>;',
                   dts_content,
                   flags=re.IGNORECASE
               )
+              # Replace design_qmax if it currently is 0x0C2B (or 0x0c2b with leading zeros)
               dts_content = re.sub(
                   r'(design_qmax\s*=\s*)<0x0*0c2b>;',
                   r'\1<0x0C80>;',

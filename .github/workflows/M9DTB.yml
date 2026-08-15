@@ -207,19 +207,26 @@ jobs:
           def apply_teacupx_oc(dts_content):
               """
               Add a full step‑by‑step CPU, GPU and RAM overclocking ladder.
-              Frequencies are inserted only if they don't already exist.
-              Existing disabled OPPs are enabled (remove 'status = "disabled";').
+              Handles both 'cpu0_opp_table' and 'cpu0-opp-table' naming.
               """
+              # Helper to insert OPPs into a given OPP table node (robust)
               def insert_opps(dts, node_name, opp_list):
                   """
                   opp_list: list of (freq_hz, microvolt) tuples.
                   microvolt can be None for RAM (voltage not used).
                   """
-                  # Find the OPP table node
-                  pattern = r'\n[ \t]*(' + re.escape(node_name) + r'\s*\{)'
-                  match = re.search(pattern, dts)
-                  if not match:
+                  # Try both underscore and hyphen variants
+                  possible_names = [node_name, node_name.replace('_', '-'), node_name.replace('-', '_')]
+                  found_node = None
+                  for name in possible_names:
+                      pattern = r'\n[ \t]*(' + re.escape(name) + r'\s*\{)'
+                      match = re.search(pattern, dts)
+                      if match:
+                          found_node = (name, match)
+                          break
+                  if not found_node:
                       return dts
+                  node_name, match = found_node
                   start = match.start()
                   # Find the matching closing brace
                   brace_count = 1
@@ -297,23 +304,26 @@ jobs:
           def patch_battery_capacity(dts_content):
               """
               Update battery design_capacity and design_qmax to 3200mAh (0x0C80).
-              Uses a more robust regex that matches any hex value and only replaces if the old value matches the stock ones.
+              Directly replaces the lines within the 'battery' subnode.
               """
-              # Replace design_capacity if it currently is 0x0B10 (or 0x0b10 with leading zeros)
-              dts_content = re.sub(
-                  r'(design_capacity\s*=\s*)<0x0*0b10>;',
+              # Find the battery subnode and replace the values inside it
+              # We'll locate the 'battery {' block and then the specific lines.
+              battery_block = extract_subnode(dts_content, "pmic@20", "battery")
+              if not battery_block:
+                  return dts_content
+              # Replace the values inside the block
+              new_block = re.sub(
+                  r'(design_capacity\s*=\s*)<0x[0-9a-fA-F]+>;',
                   r'\1<0x0C80>;',
-                  dts_content,
-                  flags=re.IGNORECASE
+                  battery_block
               )
-              # Replace design_qmax if it currently is 0x0C2B (or 0x0c2b with leading zeros)
-              dts_content = re.sub(
-                  r'(design_qmax\s*=\s*)<0x0*0c2b>;',
+              new_block = re.sub(
+                  r'(design_qmax\s*=\s*)<0x[0-9a-fA-F]+>;',
                   r'\1<0x0C80>;',
-                  dts_content,
-                  flags=re.IGNORECASE
+                  new_block
               )
-              return dts_content
+              # Replace the old block with the new block in the whole DTS
+              return dts_content.replace(battery_block, new_block)
 
           # ---- Main ----
 
@@ -376,8 +386,6 @@ jobs:
           base_dts = inject_nodes(base_dts, source_root_nodes, stock_map, k36_map, base_dts)
 
           # 7. Inject battery and charger subnodes into pmic@20 in K36 base
-          # First, ensure pmic@20 exists in K36, or we need to find it.
-          # We'll assume it exists. We'll inject the subnodes into it.
           if battery_block:
               print("[*] Injecting battery subnode into pmic@20...")
               base_dts = inject_node_into_parent(base_dts, "pmic@20", battery_block)

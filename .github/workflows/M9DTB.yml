@@ -162,18 +162,15 @@ jobs:
                   opp_list: list of (freq_hz, microvolt) tuples.
                   microvolt can be None for RAM (voltage not used).
                   """
-                  # Locate the OPP table node using a more reliable method
-                  pattern = r'\n[ \t]*(' + re.escape(node_name) + r'\s*\{)'
+                  # Locate the OPP table node by searching for 'node_name {'
+                  pattern = r'\n[ \t]*' + re.escape(node_name) + r'\s*\{'
                   match = re.search(pattern, dts)
                   if not match:
                       return dts
-                  node_start = match.start()
+                  start = match.start()
                   # Find the matching closing brace
                   brace_count = 1
-                  idx = dts.find('{', node_start)
-                  if idx == -1:
-                      return dts
-                  idx += 1
+                  idx = dts.find('{', start) + 1
                   while idx < len(dts) and brace_count > 0:
                       if dts[idx] == '{':
                           brace_count += 1
@@ -182,49 +179,16 @@ jobs:
                       idx += 1
                   if brace_count != 0:
                       return dts
-                  node_end = idx
-                  node_content = dts[node_start:node_end]
+                  end = idx
+                  node_content = dts[start:end]
 
                   # Remove any 'status = "disabled";' lines inside the node
                   node_content_clean = re.sub(r'\n[ \t]*status\s*=\s*"disabled";', '', node_content)
 
-                  # Extract all existing OPP entries as blocks
-                  # We'll find each 'opp-<freq> {' block and extract it
-                  # A more robust way: find all entries that end with '};'
-                  opp_blocks = []
-                  # Regex to find an OPP entry: starts with opp-<freq> { ... };
-                  # We'll scan for 'opp-' and extract the block
-                  pos = 0
-                  while True:
-                      # Find next 'opp-' occurrence
-                      opp_start = node_content_clean.find('\n\t\topp-', pos)
-                      if opp_start == -1:
-                          break
-                      # Find the opening brace after that
-                      brace_idx = node_content_clean.find('{', opp_start)
-                      if brace_idx == -1:
-                          break
-                      # Find matching closing brace
-                      cnt = 1
-                      idx2 = brace_idx + 1
-                      while idx2 < len(node_content_clean) and cnt > 0:
-                          if node_content_clean[idx2] == '{':
-                              cnt += 1
-                          elif node_content_clean[idx2] == '}':
-                              cnt -= 1
-                          idx2 += 1
-                      if cnt != 0:
-                          break
-                      # The entry ends at idx2
-                      entry = node_content_clean[opp_start:idx2].strip()
-                      opp_blocks.append(entry)
-                      pos = idx2
-
                   # Extract existing opp-hz lines to avoid duplicates
                   existing_opp_hz = set()
-                  for entry in opp_blocks:
-                      for m in re.finditer(r'opp-hz\s*=\s*<[^>]+>;', entry):
-                          existing_opp_hz.add(m.group(0))
+                  for m in re.finditer(r'opp-hz\s*=\s*<[^>]+>;', node_content_clean):
+                      existing_opp_hz.add(m.group(0))
 
                   # Build new OPP entries that are not already present
                   new_entries = []
@@ -241,7 +205,7 @@ jobs:
 
                   if not new_entries:
                       # Only need to remove disabled status
-                      return dts[:node_start] + node_content_clean + dts[node_end:]
+                      return dts[:start] + node_content_clean + dts[end:]
 
                   # Insert new entries before the closing brace of the node
                   # Find the last '}' before the end
@@ -249,11 +213,8 @@ jobs:
                   if last_brace_pos == -1:
                       return dts
                   insertion = "\n" + "\n".join(new_entries)
-                  # Insert after the last '}'? Actually we want to insert before the closing brace,
-                  # so we replace the node content with the cleaned content and new entries inserted
-                  # at the position of the last '}'.
                   new_node_content = node_content_clean[:last_brace_pos] + insertion + node_content_clean[last_brace_pos:]
-                  return dts[:node_start] + new_node_content + dts[node_end:]
+                  return dts[:start] + new_node_content + dts[end:]
 
               # ---- CPU OPPs (frequencies in Hz, voltage in microvolts) ----
               # Stock already has: 1008, 1104, 1200, 1248, 1296, 1416, 1512
@@ -288,20 +249,21 @@ jobs:
           def patch_battery_capacity(dts_content):
               """
               Update battery design_capacity and design_qmax to 3200mAh (0x0C80).
-              We find the battery node inside the rk817 PMIC and replace the values.
+              Fix: match hex values with any number of leading zeros.
               """
-              # Pattern to find the battery node inside pmic
-              # We look for the 'battery {' block and then the specific properties.
-              # We'll do a targeted replacement to avoid changing other nodes.
-              # First, find the battery block.
-              # Using a robust approach: locate 'battery {' and then replace inside it.
-              # But we can simply replace the numeric values if they are unique.
-              # In the stock DTB, design_capacity is 0x0B10 and design_qmax is 0x0C2B.
-              # We'll replace them with 0x0C80.
-              # We'll use regex with word boundaries to avoid partial matches.
-              # Note: The values are in hex, e.g., <0x0b10>.
-              dts_content = re.sub(r'(design_capacity\s*=\s*)<0x0b10>;', r'\1<0x0C80>;', dts_content, flags=re.IGNORECASE)
-              dts_content = re.sub(r'(design_qmax\s*=\s*)<0x0c2b>;', r'\1<0x0C80>;', dts_content, flags=re.IGNORECASE)
+              # Use regex that allows optional leading zeros: 0x0*0b10 and 0x0*0c2b
+              dts_content = re.sub(
+                  r'(design_capacity\s*=\s*)<0x0*0b10>;',
+                  r'\1<0x0C80>;',
+                  dts_content,
+                  flags=re.IGNORECASE
+              )
+              dts_content = re.sub(
+                  r'(design_qmax\s*=\s*)<0x0*0c2b>;',
+                  r'\1<0x0C80>;',
+                  dts_content,
+                  flags=re.IGNORECASE
+              )
               return dts_content
 
           # ---- Main ----

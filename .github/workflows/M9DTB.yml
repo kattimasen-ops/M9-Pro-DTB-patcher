@@ -285,6 +285,25 @@ jobs:
 
               return dts_content
 
+          def patch_battery_capacity(dts_content):
+              """
+              Update battery design_capacity and design_qmax to 3200mAh (0x0C80).
+              We find the battery node inside the rk817 PMIC and replace the values.
+              """
+              # Pattern to find the battery node inside pmic
+              # We look for the 'battery {' block and then the specific properties.
+              # We'll do a targeted replacement to avoid changing other nodes.
+              # First, find the battery block.
+              # Using a robust approach: locate 'battery {' and then replace inside it.
+              # But we can simply replace the numeric values if they are unique.
+              # In the stock DTB, design_capacity is 0x0B10 and design_qmax is 0x0C2B.
+              # We'll replace them with 0x0C80.
+              # We'll use regex with word boundaries to avoid partial matches.
+              # Note: The values are in hex, e.g., <0x0b10>.
+              dts_content = re.sub(r'(design_capacity\s*=\s*)<0x0b10>;', r'\1<0x0C80>;', dts_content, flags=re.IGNORECASE)
+              dts_content = re.sub(r'(design_qmax\s*=\s*)<0x0c2b>;', r'\1<0x0C80>;', dts_content, flags=re.IGNORECASE)
+              return dts_content
+
           # ---- Main ----
 
           # 1. Check inputs
@@ -333,7 +352,11 @@ jobs:
           print("[*] Applying step‑by‑step overclocking...")
           base_dts = apply_teacupx_oc(base_dts)
 
-          # 7. Write merged DTS and compile
+          # 7. Patch battery capacity to 3200mAh
+          print("[*] Patching battery capacity to 3200mAh (design_capacity = 0x0C80)...")
+          base_dts = patch_battery_capacity(base_dts)
+
+          # 8. Write merged DTS and compile
           with open("merged.dts", "w", encoding="utf-8") as f:
               f.write(base_dts)
 
@@ -342,7 +365,7 @@ jobs:
                           "-Wno-unique_unit_address", "-Wno-graph_child_address",
                           "-o", OUTPUT_DTB, "merged.dts"], check=True)
 
-          # 8. Verification
+          # 9. Verification
           print("[*] Verifying final DTB...")
           decompile(OUTPUT_DTB, "verify.dts")
           with open("verify.dts", "r", encoding="utf-8") as f:
@@ -367,6 +390,13 @@ jobs:
           for prof in cpu_check + gpu_check + dmc_check:
               found = prof in final_dts
               log.append(f"  - {prof}: {'ACTIVE' if found else 'MISSING'}")
+
+          # Check battery capacity
+          log.append("[+] Battery capacity:")
+          cap_found = re.search(r'design_capacity\s*=\s*<0x0C80>;', final_dts)
+          qmax_found = re.search(r'design_qmax\s*=\s*<0x0C80>;', final_dts)
+          log.append(f"  - design_capacity: {'OK (3200mAh)' if cap_found else 'MISSING'}")
+          log.append(f"  - design_qmax: {'OK (3200mAh)' if qmax_found else 'MISSING'}")
 
           log_text = "\n".join(log)
           with open("patch_verification.log", "w", encoding="utf-8") as f:

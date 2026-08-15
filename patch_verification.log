@@ -19,5 +19,5 @@
   - opp-933000000: ACTIVE
   - opp-1056000000: ACTIVE
 [+] Battery capacity:
-  - design_capacity: MISSING
-  - design_qmax: MISSING
+  - design_capacity: OK (3200mAh)
+  - design_qmax:     OK (3200mAh)

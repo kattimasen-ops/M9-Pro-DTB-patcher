@@ -1,9 +1,22 @@
 ==================================================
-      M9 PRO JOYSTICK RGB MULTI-DONOR LOG
+      M9 PRO DTB PATCH & OVERCLOCK VERIFICATION   
 ==================================================
-Base File: rk3326-m9pro-linux.dtb
-Output File: rk3326-m9pro-linux.dtb.patched
-Donors Scanned: rg32tw3ka.dtb, rk3326-r36tmax-linux.dtb, rk3326-k36s-linux.dtb, rk3326-k36-linux.dtb
+Target File: rk3326-k36-linux.dtb
 
-[+] Injected Joystick RGB / Zed nodes:
-  - play_joystick: OK
+[+] Überprüfung der injizierten Hardware-Knoten:
+  - Node 'led': BESTÄTIGT (Gefunden)
+  - Node 'led-vcc': BESTÄTIGT (Gefunden)
+  - Node 'sdio-pwrseq': BESTÄTIGT (Gefunden)
+  - Node 'vcc-led': BESTÄTIGT (Gefunden)
+
+[+] Überprüfung der TeacupX Overclocking-Profile:
+  - Profile 'opp-1300000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-1416000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-1512000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-667000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-700000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-800000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-933000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-1056000000': ANGEWENDET (Aktiv)
+
+[✓] Gegencheck erfolgreich abgeschlossen. Keine Duplikate oder Kollisionen.

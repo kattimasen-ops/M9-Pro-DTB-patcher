@@ -1,6 +1,46 @@
 ==================================================
-      M9 PRO JOYSTICK RGB LED / ZED PATCH LOG
+  M9 PRO MASTER SELF-HEALING & RGB PATCH LOG
 ==================================================
 Output File: rk3326-m9pro-linux.dtb.patched
 Internal Model Name: m9pro
-[+] Injected LED/Zed nodes:
+
+[+] Injected LED/Zed & Hardware nodes:
+  - arkos4clone-leds: OK
+  - backlight: OK
+  - isp-prelight: OK
+  - lcdc-m0-rgb-pins: OK
+  - lcdc-m1-rgb-pins: OK
+  - led: OK
+  - led-vcc: OK
+  - ledvcc-en-gpio: OK
+  - pwm: OK
+  - pwm0: OK
+  - pwm0-pin: OK
+  - pwm1: OK
+  - pwm1-pin: OK
+  - pwm2: OK
+  - pwm2-pin: OK
+  - pwm3: OK
+  - pwm3-pin: OK
+  - pwm4: OK
+  - pwm4-pin: OK
+  - pwm5: OK
+  - pwm5-pin: OK
+  - pwm6: OK
+  - pwm6-pin: OK
+  - pwm7: OK
+  - pwm7-pin: OK
+  - rgb: OK
+  - route-rgb: OK
+  - sdio: OK
+  - sdio-bus4: OK
+  - sdio-clk: OK
+  - sdio-cmd: OK
+  - sdio-gpio: OK
+  - sdio-pwrseq: OK
+  - vcc-led: OK
+  - wifi-enable-h: OK
+  - wireless-wlan: OK
+
+[+] Battery Capacity Check:
+  - 3200mAh (0x0C80): CONFIRMED

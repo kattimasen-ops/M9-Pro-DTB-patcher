@@ -1,31 +1,22 @@
 ==================================================
-      M9 PRO JOYSTICK RGB (R36T MAX) DTB LOG
+      M9 PRO DTB PATCH & OVERCLOCK VERIFICATION   
 ==================================================
-Base File: rk3326-m9pro-linux.dtb
-Donor File: rk3326-r36tmax-linux.dtb
-Output File: rk3326-m9pro-linux.dtb.patched
-Internal Model Name: m9pro
+Target File: rk3326-k36-linux.dtb
 
-[+] Injected LED/Zed nodes:
-  - arkos4clone-leds: OK
-  - lcdc-m0-rgb-pins: OK
-  - lcdc-m1-rgb-pins: OK
-  - pwm: OK
-  - pwm0: OK
-  - pwm0-pin: OK
-  - pwm1: OK
-  - pwm1-pin: OK
-  - pwm2: OK
-  - pwm2-pin: OK
-  - pwm3: OK
-  - pwm3-pin: OK
-  - pwm4: OK
-  - pwm4-pin: OK
-  - pwm5: OK
-  - pwm5-pin: OK
-  - pwm6: OK
-  - pwm6-pin: OK
-  - pwm7: OK
-  - pwm7-pin: OK
-  - rgb: OK
-  - route-rgb: OK
+[+] Überprüfung der injizierten Hardware-Knoten:
+  - Node 'led': BESTÄTIGT (Gefunden)
+  - Node 'led-vcc': BESTÄTIGT (Gefunden)
+  - Node 'sdio-pwrseq': BESTÄTIGT (Gefunden)
+  - Node 'vcc-led': BESTÄTIGT (Gefunden)
+
+[+] Überprüfung der TeacupX Overclocking-Profile:
+  - Profile 'opp-1300000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-1416000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-1512000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-667000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-700000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-800000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-933000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-1056000000': ANGEWENDET (Aktiv)
+
+[✓] Gegencheck erfolgreich abgeschlossen. Keine Duplikate oder Kollisionen.

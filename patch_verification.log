@@ -1,7 +1,8 @@
 ==================================================
-        M9 PRO JOYSTICK RGB DTB PATCH LOG
+      M9 PRO JOYSTICK RGB (R36T MAX) DTB LOG
 ==================================================
 Base File: rk3326-m9pro-linux.dtb
+Donor File: rk3326-r36tmax-linux.dtb
 Output File: rk3326-m9pro-linux.dtb.patched
 Internal Model Name: m9pro
 
@@ -9,9 +10,6 @@ Internal Model Name: m9pro
   - arkos4clone-leds: OK
   - lcdc-m0-rgb-pins: OK
   - lcdc-m1-rgb-pins: OK
-  - led: OK
-  - led-vcc: OK
-  - ledvcc-en-gpio: OK
   - pwm: OK
   - pwm0: OK
   - pwm0-pin: OK
@@ -31,4 +29,3 @@ Internal Model Name: m9pro
   - pwm7-pin: OK
   - rgb: OK
   - route-rgb: OK
-  - vcc-led: OK

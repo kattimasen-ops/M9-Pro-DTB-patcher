@@ -1,4 +1,4 @@
-name: Build M9 Pro DTB for ArkOS4Clones
+name: Create M9 Pro DTB for ArkOS4Clones
 
 on:
   push:

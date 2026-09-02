@@ -28,22 +28,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y device-tree-compiler python3
 
-      - name: Patch M9 Pro DTB with R36T Max Joystick RGB LED Controls
+      - name: Patch M9 Pro DTB with Multi-Donor Joystick RGB LED Controls
         run: |
           python3 - << 'EOF'
           import re, subprocess, os
 
-          # Base target and updated donor DTB
           BASE_DTB = "rk3326-m9pro-linux.dtb"
-          DONOR_DTB = "rk3326-r36tmax-linux.dtb"
+          DONOR_DTBS = [
+              "rg32tw3ka.dtb",
+              "rk3326-r36tmax-linux.dtb",
+              "rk3326-k36s-linux.dtb",
+              "rk3326-k36-linux.dtb"
+          ]
           OUTPUT_DTB = "rk3326-m9pro-linux.dtb.patched"
 
           if not os.path.exists(BASE_DTB):
               print(f"[!] ERROR: Target base file '{BASE_DTB}' not found in repo root!")
-              exit(1)
-
-          if not os.path.exists(DONOR_DTB):
-              print(f"[!] ERROR: Donor file '{DONOR_DTB}' not found in repo root!")
               exit(1)
 
           def decompile(dtb_path, dts_path):
@@ -105,62 +105,69 @@ jobs:
                           extracted_blocks.append((node_name, text[start_idx:end_idx].strip()))
               return extracted_blocks
 
-          print(f"[*] Decompiling Base ({BASE_DTB}) and R36T Max Donor ({DONOR_DTB})...")
+          print(f"[*] Decompiling Base DTB: {BASE_DTB}")
           decompile(BASE_DTB, "base.dts")
-          decompile(DONOR_DTB, "donor.dts")
 
           with open("base.dts", "r", encoding="utf-8") as f: base_dts = f.read()
-          with open("donor.dts", "r", encoding="utf-8") as f: donor_dts = f.read()
 
-          print("[*] Purging conflicting LED and Zed nodes from base M9 Pro...")
+          # Clean previous joystick LED/Zed injections while preserving base hardware
           base_dts = re.sub(r'\n\t/\* --- INJECTED.*?/\* --- END INJECTED.*?\*/\n', '', base_dts, flags=re.DOTALL)
-          for node in ["vcc-led", "ledvcc-en-gpio", "led-vcc", "gpio-leds", "gpio_leds", "led", "pwm-leds", "pwm_leds", "rgb-led", "rgb_led", "play_joystick", "zed", "zed_gadget", "zed_service"]:
+          for node in ["vcc-led", "ledvcc-en-gpio", "play_joystick", "zed", "zed_gadget", "zed_service"]:
               base_dts = purge_node(base_dts, node)
 
           base_map = build_phandle_map(base_dts)
-          donor_map = build_phandle_map(donor_dts)
-          translation_dict = {d_ph: base_map[name] for name, d_ph in donor_map.items() if name in base_map}
-
-          keywords = ["play_joystick", "zed", "zed_gadget", "zed_service", "rgb", "pwm", "led", "joystick"]
-          found_nodes = extract_root_nodes_by_keywords(donor_dts, keywords)
-
           target_phandles = set(int(m.group(1), 16) for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', base_dts))
           new_ph_counter = max(target_phandles) + 1 if target_phandles else 0x1000
 
-          internal_ph_map = {}
-          for _, block in found_nodes:
-              for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', block):
-                  old_ph = m.group(1).lower()
-                  if old_ph not in internal_ph_map:
-                      internal_ph_map[old_ph] = f"0x{new_ph_counter:x}"
-                      new_ph_counter += 1
-
           injected_names = set()
           injections = "\n\t/* --- INJECTED M9 PRO JOYSTICK RGB LED & ZED NODES --- */\n"
+          keywords = ["play_joystick", "zed", "zed_gadget", "zed_service", "rgb", "joystick_led", "led_rgb"]
 
-          for node_name, block in found_nodes:
-              clean_name = node_name.split('@')[0]
-              if "battery" in clean_name.lower() or clean_name.lower() in ["charge-led-gpio"]: continue
-              if clean_name in injected_names: continue
+          for donor in DONOR_DTBS:
+              if not os.path.exists(donor):
+                  print(f"[!] Warning: Donor DTB '{donor}' not found in repo. Skipping.")
+                  continue
+              
+              donor_dts_file = f"{donor}.dts"
+              print(f"[*] Decompiling Donor DTB: {donor}")
+              decompile(donor, donor_dts_file)
+              
+              with open(donor_dts_file, "r", encoding="utf-8") as f:
+                  donor_dts = f.read()
+                  
+              donor_map = build_phandle_map(donor_dts)
+              translation_dict = {d_ph: base_map[name] for name, d_ph in donor_map.items() if name in base_map}
+              
+              found_nodes = extract_root_nodes_by_keywords(donor_dts, keywords)
+              
+              internal_ph_map = {}
+              for _, block in found_nodes:
+                  for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', block):
+                      old_ph = m.group(1).lower()
+                      if old_ph not in internal_ph_map:
+                          internal_ph_map[old_ph] = f"0x{new_ph_counter:x}"
+                          new_ph_counter += 1
 
-              injected_names.add(clean_name)
-              for orig_ph, targ_ph in translation_dict.items():
-                  block = re.sub(r'\b' + orig_ph + r'\b', targ_ph, block, flags=re.IGNORECASE)
-              for old_internal, new_internal in internal_ph_map.items():
-                  block = re.sub(r'\b' + old_internal + r'\b', new_internal, block, flags=re.IGNORECASE)
+              for node_name, block in found_nodes:
+                  clean_name = node_name.split('@')[0]
+                  if "battery" in clean_name.lower() or clean_name.lower() in ["charge-led-gpio"]:
+                      continue
+                  if clean_name in injected_names or find_node_boundaries(base_dts, clean_name)[0] is not None:
+                      continue
 
-              injections += "\t" + block.replace("\n", "\n\t") + "\n\n"
+                  injected_names.add(clean_name)
+                  for orig_ph, targ_ph in translation_dict.items():
+                      block = re.sub(r'\b' + orig_ph + r'\b', targ_ph, block, flags=re.IGNORECASE)
+                  for old_internal, new_internal in internal_ph_map.items():
+                      block = re.sub(r'\b' + old_internal + r'\b', new_internal, block, flags=re.IGNORECASE)
+
+                  injections += "\t" + block.replace("\n", "\n\t") + "\n\n"
 
           if injected_names:
               last_brace = base_dts.rfind("};")
               if last_brace != -1:
                   injections += "\t/* --- END INJECTED M9 PRO NODES --- */\n"
                   base_dts = base_dts[:last_brace] + injections + base_dts[last_brace:]
-
-          print("[*] Enforcing internal device model name to 'm9pro'...")
-          base_dts = re.sub(r'model\s*=\s*"[^"]*";', 'model = "m9pro";', base_dts, count=1)
-          base_dts = re.sub(r'design_capacity\s*=\s*<0x[0-9a-fA-F]+>;', 'design_capacity = <0x0C80>;', base_dts)
-          base_dts = re.sub(r'design_qmax\s*=\s*<0x[0-9a-fA-F]+>;', 'design_qmax = <0x0C80>;', base_dts)
 
           with open("merged.dts", "w", encoding="utf-8") as f: f.write(base_dts)
 
@@ -173,14 +180,13 @@ jobs:
 
           log = [
               "==================================================",
-              "      M9 PRO JOYSTICK RGB (R36T MAX) DTB LOG",
+              "      M9 PRO JOYSTICK RGB MULTI-DONOR LOG",
               "==================================================",
               f"Base File: {BASE_DTB}",
-              f"Donor File: {DONOR_DTB}",
               f"Output File: {OUTPUT_DTB}",
-              f"Internal Model Name: {'m9pro' if 'model = \"m9pro\";' in final_text else 'MISSING'}",
+              f"Donors Scanned: {', '.join(DONOR_DTBS)}",
               "",
-              "[+] Injected LED/Zed nodes:"
+              "[+] Injected Joystick RGB / Zed nodes:"
           ]
           for name in sorted(injected_names):
               log.append(f"  - {name}: {'OK' if name in final_text else 'MISSING'}")
@@ -206,6 +212,6 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add rk3326-m9pro-linux.dtb.patched patch_verification.log
-          git diff --quiet && git diff --staged --quiet || git commit -m "fix(dtb): patch m9pro dtb with r36t max joystick rgb led and zed nodes [skip ci]"
+          git diff --quiet && git diff --staged --quiet || git commit -m "fix(dtb): patch m9pro dtb with joystick rgb led and zed nodes from all donors [skip ci]"
           git pull --rebase origin main || true
           git push origin main

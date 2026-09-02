@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install DTC & Python
         run: |
@@ -31,7 +33,7 @@ jobs:
           python3 - << 'EOF'
           import re, subprocess, os
 
-          # Hard-locked M9 Pro DTB target
+          # Target M9 Pro DTB directly
           BASE_DTB = "rk3326-m9pro-linux.dtb"
           DONOR_DTB = "rk3326-k36-linux.dtb"
           OUTPUT_DTB = "rk3326-m9pro-linux.dtb.patched"
@@ -41,10 +43,8 @@ jobs:
               exit(1)
 
           if not os.path.exists(DONOR_DTB):
-              print(f"[!] ERROR: Donor RGB file '{DONOR_DTB}' not found in repo root!")
+              print(f"[!] ERROR: Donor file '{DONOR_DTB}' not found in repo root!")
               exit(1)
-
-          # ---- Helper Functions ----
 
           def decompile(dtb_path, dts_path):
               subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f", "-o", dts_path, dtb_path], check=True)
@@ -105,33 +105,22 @@ jobs:
                           extracted_blocks.append((node_name, text[start_idx:end_idx].strip()))
               return extracted_blocks
 
-          # ---- Patch Execution ----
-
-          print(f"[*] Decompiling M9 Pro Base ({BASE_DTB}) and K36 Donor ({DONOR_DTB})...")
+          print(f"[*] Decompiling Base ({BASE_DTB}) and Donor ({DONOR_DTB})...")
           decompile(BASE_DTB, "base.dts")
           decompile(DONOR_DTB, "donor.dts")
 
           with open("base.dts", "r", encoding="utf-8") as f: base_dts = f.read()
           with open("donor.dts", "r", encoding="utf-8") as f: donor_dts = f.read()
 
-          print("[*] Cleaning M9 Pro DTS and purging conflicting LED/Zed nodes...")
+          print("[*] Purging conflicting LED and Zed nodes from base M9 Pro...")
           base_dts = re.sub(r'\n\t/\* --- INJECTED.*?/\* --- END INJECTED.*?\*/\n', '', base_dts, flags=re.DOTALL)
-
-          nodes_to_purge = [
-              "vcc-led", "ledvcc-en-gpio", "led-vcc", "gpio-leds", "gpio_leds", 
-              "led", "pwm-leds", "pwm_leds", "rgb-led", "rgb_led", 
-              "play_joystick", "zed", "zed_gadget", "zed_service"
-          ]
-          for node in nodes_to_purge:
+          for node in ["vcc-led", "ledvcc-en-gpio", "led-vcc", "gpio-leds", "gpio_leds", "led", "pwm-leds", "pwm_leds", "rgb-led", "rgb_led", "play_joystick", "zed", "zed_gadget", "zed_service"]:
               base_dts = purge_node(base_dts, node)
 
-          print("[*] Mapping phandles between base and donor...")
           base_map = build_phandle_map(base_dts)
           donor_map = build_phandle_map(donor_dts)
-
           translation_dict = {d_ph: base_map[name] for name, d_ph in donor_map.items() if name in base_map}
 
-          print("[*] Extracting Joystick RGB LED ring and Zed nodes from K36 donor...")
           keywords = ["play_joystick", "zed", "zed_gadget", "zed_service", "rgb", "pwm", "led"]
           found_nodes = extract_root_nodes_by_keywords(donor_dts, keywords)
 
@@ -151,17 +140,12 @@ jobs:
 
           for node_name, block in found_nodes:
               clean_name = node_name.split('@')[0]
-              if "battery" in clean_name.lower() or clean_name.lower() in ["charge-led-gpio"]:
-                  continue
-              if clean_name in injected_names:
-                  continue
+              if "battery" in clean_name.lower() or clean_name.lower() in ["charge-led-gpio"]: continue
+              if clean_name in injected_names: continue
 
               injected_names.add(clean_name)
-              print(f"[+] Injecting node into M9 Pro: {clean_name}")
-
               for orig_ph, targ_ph in translation_dict.items():
                   block = re.sub(r'\b' + orig_ph + r'\b', targ_ph, block, flags=re.IGNORECASE)
-
               for old_internal, new_internal in internal_ph_map.items():
                   block = re.sub(r'\b' + old_internal + r'\b', new_internal, block, flags=re.IGNORECASE)
 
@@ -173,22 +157,16 @@ jobs:
                   injections += "\t/* --- END INJECTED M9 PRO NODES --- */\n"
                   base_dts = base_dts[:last_brace] + injections + base_dts[last_brace:]
 
-          print("[*] Setting internal device model to 'm9pro'...")
           base_dts = re.sub(r'model\s*=\s*"[^"]*";', 'model = "m9pro";', base_dts, count=1)
-
-          print("[*] Setting battery capacity to 3200mAh...")
           base_dts = re.sub(r'design_capacity\s*=\s*<0x[0-9a-fA-F]+>;', 'design_capacity = <0x0C80>;', base_dts)
           base_dts = re.sub(r'design_qmax\s*=\s*<0x[0-9a-fA-F]+>;', 'design_qmax = <0x0C80>;', base_dts)
 
-          with open("merged.dts", "w", encoding="utf-8") as f:
-              f.write(base_dts)
+          with open("merged.dts", "w", encoding="utf-8") as f: f.write(base_dts)
 
-          print(f"[*] Compiling output DTB to {OUTPUT_DTB}...")
           subprocess.run(["dtc", "-I", "dts", "-O", "dtb", "-f",
                           "-Wno-unique_unit_address", "-Wno-graph_child_address",
                           "-o", OUTPUT_DTB, "merged.dts"], check=True)
 
-          # Verification Check
           decompile(OUTPUT_DTB, "verify.dts")
           with open("verify.dts", "r", encoding="utf-8") as f: final_text = f.read()
 
@@ -208,7 +186,6 @@ jobs:
           log_text = "\n".join(log)
           with open("patch_verification.log", "w", encoding="utf-8") as f: f.write(log_text)
           print(log_text)
-          print("[✓] M9 Pro DTB patch successfully completed!")
           EOF
 
       - name: Upload Artifacts
@@ -220,7 +197,7 @@ jobs:
             patch_verification.log
           retention-days: 14
 
-      - name: Commit and Push (force)
+      - name: Commit and Push
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -228,4 +205,5 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add rk3326-m9pro-linux.dtb.patched patch_verification.log
           git diff --quiet && git diff --staged --quiet || git commit -m "fix(dtb): patch m9pro dtb with k36 joystick rgb led and zed nodes [skip ci]"
-          git push --force origin main
+          git pull --rebase origin main || true
+          git push origin main

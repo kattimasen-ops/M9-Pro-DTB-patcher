@@ -26,36 +26,32 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y device-tree-compiler python3
 
-      - name: Build M9 Pro DTB
+      - name: Patch M9 Pro DTB with Joystick RGB LED Controls
         run: |
           python3 - << 'EOF'
           import re, subprocess, os
 
-          # Input DTBs
-          STOCK_DTB = "rg32tw3ka.dtb"          
-          K36_DTB   = "rk3326-k36-linux.dtb"   
-          OUTPUT_DTB = "rk3326-m9-4clones.dtb"
+          # Target your working M9 Pro DTB directly as the base
+          BASE_DTB = "rk3326-m9pro-linux.dtb"
+          DONOR_DTB = "rk3326-k36-linux.dtb"
+          OUTPUT_DTB = "rk3326-m9pro-linux.dtb.patched"
 
-          # ---- Helper functions ----
+          if not os.path.exists(BASE_DTB):
+              print(f"[!] Error: Base working DTB '{BASE_DTB}' not found in repo root!")
+              exit(1)
 
-          def decompile(dtb_path, dts_path):
-              subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f", "-o", dts_path, dtb_path], check=True)
+          if not os.path.exists(DONOR_DTB):
+              print(f"[!] Error: Donor DTB '{DONOR_DTB}' not found in repo root!")
+              exit(1)
 
-          def build_phandle_map(dts_content):
-              """Return dict {node_name: phandle_string} from the DTS."""
-              pmap = {}
-              for match in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', dts_content):
-                  ph_val = match.group(1)
-                  text_before = dts_content[:match.start()]
-                  brace_idx = text_before.rfind('{')
-                  if brace_idx != -1:
-                      node_decl = text_before[:brace_idx].strip().split('\n')[-1].strip()
-                      node_name = node_decl.split(':')[-1].strip().split()[0]
-                      pmap[node_name] = ph_val
-              return pmap
+          print(f"[*] Decompiling base ({BASE_DTB}) and donor ({DONOR_DTB})...")
+          subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f", "-o", "base.dts", BASE_DTB], check=True)
+          subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f", "-o", "donor.dts", DONOR_DTB], check=True)
+
+          with open("base.dts", "r", encoding="utf-8") as f: base_dts = f.read()
+          with open("donor.dts", "r", encoding="utf-8") as f: donor_dts = f.read()
 
           def find_node_boundaries(dts_content, node_name):
-              """Find exact start and end string indices for a node block."""
               pattern = re.compile(r'(?:^[ \t]*|[ \t]+)([a-zA-Z0-9_-]+:\s*)?' + re.escape(node_name) + r'(?:@[a-zA-Z0-9_,+-]+)?\s*\{', re.MULTILINE)
               match = pattern.search(dts_content)
               if not match:
@@ -68,7 +64,7 @@ jobs:
                   elif dts_content[i] == '}': brace_count -= 1
                   if brace_count == 0:
                       end_idx = i + 1
-                      if end_idx < len(dts_content) and dts_content[end_idx] == ';': 
+                      if end_idx < len(dts_content) and end_idx == ';': 
                           end_idx += 1
                       return start_idx, end_idx
               return None, None
@@ -79,220 +75,109 @@ jobs:
                   return dts_content[start:end].strip()
               return None
 
-          def extract_subnode(dts_content, parent_name, node_name):
-              p_start, p_end = find_node_boundaries(dts_content, parent_name)
-              if p_start is None: return None
-              parent_block = dts_content[p_start:p_end]
-              s_start, s_end = find_node_boundaries(parent_block, node_name)
-              if s_start is None: return None
-              return parent_block[s_start:s_end].strip()
-
           def purge_node(text, node_name):
-              """Remove all occurrences of a node from DTS text."""
               while True:
                   start, end = find_node_boundaries(text, node_name)
                   if start is None: break
                   text = text[:start] + text[end:]
               return text
 
-          def inject_root_nodes(target_dts, source_nodes, source_phandle_map, target_phandle_map):
-              translation = {ph: target_phandle_map[n] for n, ph in source_phandle_map.items() if n in target_phandle_map}
-              
-              target_phandles = set(int(m.group(1), 16) for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', target_dts))
-              new_ph_counter = max(target_phandles) + 1 if target_phandles else 0x1000
+          print("[*] Analyzing and extracting joystick RGB LED controller / zed nodes from K36...")
+          # Target specific ArkOS LED / joystick controller strings including zed / zed_gadget / zed_service variants
+          target_led_nodes = [
+              "play_joystick", "zed", "zed_gadget", "zed_service", 
+              "rgb-led", "rgb_led", "joystick_led", "led_ring", 
+              "pwm-leds", "pwm_leds", "gpio-leds", "gpio_leds"
+          ]
 
-              internal_ph_map = {}
-              injected_blocks = []
-
-              for name, block in source_nodes:
-                  target_dts = purge_node(target_dts, name)
-                  for src_ph, tgt_ph in translation.items():
-                      block = re.sub(r'\b' + src_ph + r'\b', tgt_ph, block)
-                  for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', block):
-                      old_ph = m.group(1).lower()
-                      if old_ph not in internal_ph_map:
-                          internal_ph_map[old_ph] = f"0x{new_ph_counter:x}"
-                          new_ph_counter += 1
-                      block = re.sub(r'\b' + old_ph + r'\b', internal_ph_map[old_ph], block)
-                  injected_blocks.append(block)
-
-              if not injected_blocks: return target_dts
-              
-              last_brace = target_dts.rfind("};")
-              if last_brace == -1: return target_dts
-
-              insert = "\n\t/* --- INJECTED ROOT NODES --- */\n"
-              for block in injected_blocks:
-                  insert += "\t" + block.replace("\n", "\n\t") + "\n\n"
-              insert += "\t/* --- END INJECTED ROOT NODES --- */\n"
-              
-              return target_dts[:last_brace] + insert + target_dts[last_brace:]
-
-          def inject_node_into_parent(target_dts, parent_name, node_block):
-              p_start, p_end = find_node_boundaries(target_dts, parent_name)
-              if p_start is None: return target_dts
-              parent_block = target_dts[p_start:p_end]
-              last_brace = parent_block.rfind('}')
-              if last_brace == -1: return target_dts
-              
-              new_parent_block = parent_block[:last_brace] + "\t" + node_block.replace("\n", "\n\t") + "\n" + parent_block[last_brace:]
-              return target_dts[:p_start] + new_parent_block + target_dts[p_end:]
-
-          def patch_battery_block(battery_block):
-              """Replace design_capacity and design_qmax values with 3200mAh (<0x0C80>)."""
-              patched = re.sub(r'design_capacity\s*=\s*<0x[0-9a-fA-F]+>;', 'design_capacity = <0x0C80>;', battery_block)
-              patched = re.sub(r'design_qmax\s*=\s*<0x[0-9a-fA-F]+>;', 'design_qmax = <0x0C80>;', patched)
-              return patched
-
-          def apply_teacupx_oc(dts_content):
-              def insert_opps(dts, possible_names, opp_list):
-                  for name in possible_names:
-                      start, end = find_node_boundaries(dts, name)
-                      if start is not None: break
-                  else:
-                      return dts 
-
-                  node_content = dts[start:end]
-                  # 1. Bruteforce strip all "disabled" statuses inside the table block
-                  node_content = re.sub(r'status\s*=\s*"disabled"\s*;', '', node_content)
-
-                  # 2. Append missing OPP entries
-                  new_entries = []
-                  for freq_hz, volt in opp_list:
-                      freq_hex = f"0x{freq_hz:x}"
-                      # If the node name already exists, skip appending it
-                      if f"opp-{freq_hz}" in node_content:
-                          continue
-                      
-                      opp_hz_line = f"opp-hz = <0x00 {freq_hex}>;"
-                      if volt:
-                          opp_entry = f"\t\topp-{freq_hz} {{\n\t\t\t{opp_hz_line}\n\t\t\topp-microvolt = <{volt}>;\n\t\t}};"
-                      else:
-                          opp_entry = f"\t\topp-{freq_hz} {{\n\t\t\t{opp_hz_line}\n\t\t}};"
-                      new_entries.append(opp_entry)
-
-                  if new_entries:
-                      last_brace = node_content.rfind('}')
-                      insertion = "\n" + "\n".join(new_entries) + "\n"
-                      node_content = node_content[:last_brace] + insertion + node_content[last_brace:]
-
-                  return dts[:start] + node_content + dts[end:]
-
-              cpu_opps = [(1392000000, 1300000), (1488000000, 1325000), (1512000000, 1350000)]
-              dts_content = insert_opps(dts_content, ["cpu0_opp_table", "cpu0-opp-table", "opp-table0"], cpu_opps)
-
-              gpu_opps = [(600000000, 1100000), (667000000, 1150000), (700000000, 1200000), (800000000, 1250000)]
-              dts_content = insert_opps(dts_content, ["gpu_opp_table", "gpu-opp-table", "opp-table2"], gpu_opps)
-
-              dmc_opps = [(933000000, None), (1056000000, None)]
-              dts_content = insert_opps(dts_content, ["dmc_opp_table", "dmc-opp-table"], dmc_opps)
-
-              return dts_content
-
-          # ---- Main Execution ----
-          for f in [STOCK_DTB, K36_DTB]:
-              if not os.path.exists(f):
-                  print(f"[!] Missing {f}")
-                  exit(1)
-
-          print("[*] Decompiling DTBs...")
-          decompile(STOCK_DTB, "stock.dts")
-          decompile(K36_DTB, "k36.dts")
-
-          with open("k36.dts", "r", encoding="utf-8") as f: base_dts = f.read()
-          with open("stock.dts", "r", encoding="utf-8") as f: stock_dts = f.read()
-
-          print("[*] Building phandle maps...")
-          stock_map = build_phandle_map(stock_dts)
-          k36_map   = build_phandle_map(base_dts)
-
-          print("[*] Extracting root nodes...")
-          root_nodes = ["play_joystick", "led-vcc", "wireless-wlan", "sdio-pwrseq"]
-          source_root_nodes = []
-          for node in root_nodes:
-              block = extract_exact_node(stock_dts, node)
+          extracted_nodes = []
+          for node in target_led_nodes:
+              block = extract_exact_node(donor_dts, node)
               if block:
-                  source_root_nodes.append((node, block))
-                  print(f"[+] Found root node: {node}")
-              else:
-                  print(f"[!] WARNING: Root node '{node}' not found in stock DTB!")
+                  extracted_nodes.append((node, block))
+                  print(f"[+] Found joystick LED / zed control node in donor DTB: {node}")
 
-          print("[*] Extracting and patching pmic subnodes...")
-          battery_block = extract_subnode(stock_dts, "pmic@20", "battery")
-          charger_block = extract_subnode(stock_dts, "pmic@20", "charger")
+          # Build phandle map for safe injection matching
+          def build_phandle_map(dts_content):
+              pmap = {}
+              for match in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', dts_content):
+                  ph_val = match.group(1)
+                  text_before = dts_content[:match.start()]
+                  brace_idx = text_before.rfind('{')
+                  if brace_idx != -1:
+                      node_decl = text_before[:brace_idx].strip().split('\n')[-1].strip()
+                      node_name = node_decl.split(':')[-1].strip().split()[0]
+                      pmap[node_name] = ph_val
+              return pmap
 
-          if battery_block:
-              print("[+] Found battery subnode. Patching capacity to 3200mAh (0x0C80)...")
-              battery_block = patch_battery_block(battery_block)
+          base_map = build_phandle_map(base_dts)
+          donor_map = build_phandle_map(donor_dts)
+          translation = {ph: base_map[n] for n, ph in donor_map.items() if n in base_map}
 
-          print("[*] Injecting root nodes...")
-          base_dts = inject_root_nodes(base_dts, source_root_nodes, stock_map, k36_map)
+          target_phandles = set(int(m.group(1), 16) for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', base_dts))
+          new_ph_counter = max(target_phandles) + 1 if target_phandles else 0x1000
+          internal_ph_map = {}
 
-          print("[*] Cleaning up and injecting pmic subnodes...")
-          p_start, p_end = find_node_boundaries(base_dts, "pmic@20")
-          if p_start is not None:
-              pmic_block = base_dts[p_start:p_end]
-              pmic_block = purge_node(pmic_block, "battery")
-              pmic_block = purge_node(pmic_block, "charger")
-              base_dts = base_dts[:p_start] + pmic_block + base_dts[p_end:]
+          injected_blocks = []
+          for name, block in extracted_nodes:
+              base_dts = purge_node(base_dts, name)
+              for src_ph, tgt_ph in translation.items():
+                  block = re.sub(r'\b' + src_ph + r'\b', tgt_ph, block)
+              for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', block):
+                  old_ph = m.group(1).lower()
+                  if old_ph not in internal_ph_map:
+                      internal_ph_map[old_ph] = f"0x{new_ph_counter:x}"
+                      new_ph_counter += 1
+                  block = re.sub(r'\b' + old_ph + r'\b', internal_ph_map[old_ph], block)
+              injected_blocks.append(block)
 
-          if battery_block:
-              print("[*] Injecting patched battery subnode into pmic@20...")
-              base_dts = inject_node_into_parent(base_dts, "pmic@20", battery_block)
-          if charger_block:
-              print("[*] Injecting charger subnode into pmic@20...")
-              base_dts = inject_node_into_parent(base_dts, "pmic@20", charger_block)
+          if injected_blocks:
+              last_brace = base_dts.rfind("};")
+              if last_brace != -1:
+                  insert = "\n\t/* --- INJECTED JOYSTICK RGB LED / ZED NODES --- */\n"
+                  for block in injected_blocks:
+                      insert += "\t" + block.replace("\n", "\n\t") + "\n\n"
+                  insert += "\t/* --- END INJECTED JOYSTICK RGB LED / ZED NODES --- */\n"
+                  base_dts = base_dts[:last_brace] + insert + base_dts[last_brace:]
 
-          print("[*] Applying overclocking...")
-          base_dts = apply_teacupx_oc(base_dts)
+          print("[*] Enforcing internal device name to 'm9pro'...")
+          base_dts = re.sub(r'model\s*=\s*"[^"]*";', 'model = "m9pro";', base_dts, count=1)
 
           with open("merged.dts", "w", encoding="utf-8") as f:
               f.write(base_dts)
 
-          print("[*] Compiling final DTB...")
+          print(f"[*] Compiling final patched DTB ({OUTPUT_DTB})...")
           subprocess.run(["dtc", "-I", "dts", "-O", "dtb", "-f",
                           "-Wno-unique_unit_address", "-Wno-graph_child_address",
                           "-o", OUTPUT_DTB, "merged.dts"], check=True)
 
-          # Verification Check
-          print("[*] Verifying final DTB...")
+          # Verification output log
           decompile(OUTPUT_DTB, "verify.dts")
-          with open("verify.dts", "r", encoding="utf-8") as f: final_dts = f.read()
+          with open("verify.dts", "r", encoding="utf-8") as f: final_text = f.read()
 
-          log = ["==================================================",
-                 "      M9 PRO DTB PATCH & OVERCLOCK VERIFICATION",
-                 "==================================================",
-                 "[+] Injected nodes:"]
-          for name, _ in source_root_nodes:
-              log.append(f"  - {name}: {'OK' if name in final_dts else 'MISSING'}")
-          if battery_block: log.append(f"  - battery subnode: {'OK' if 'battery' in final_dts else 'MISSING'}")
-          if charger_block: log.append(f"  - charger subnode: {'OK' if 'charger' in final_dts else 'MISSING'}")
-
-          log.append("[+] Overclocking profiles:")
-          cpu_check = ["opp-1392000000", "opp-1488000000", "opp-1512000000"]
-          gpu_check = ["opp-600000000", "opp-667000000", "opp-700000000", "opp-800000000"]
-          dmc_check = ["opp-933000000", "opp-1056000000"]
-          for prof in cpu_check + gpu_check + dmc_check:
-              log.append(f"  - {prof}: {'ACTIVE' if prof in final_dts else 'MISSING'}")
-
-          log.append("[+] Battery capacity:")
-          cap_found = re.search(r'design_capacity\s*=\s*<0x0*[cC]80>;', final_dts)
-          qmax_found = re.search(r'design_qmax\s*=\s*<0x0*[cC]80>;', final_dts)
-          log.append(f"  - design_capacity: {'OK (3200mAh)' if cap_found else 'MISSING'}")
-          log.append(f"  - design_qmax:     {'OK (3200mAh)' if qmax_found else 'MISSING'}")
+          log = [
+              "==================================================",
+              "      M9 PRO JOYSTICK RGB LED / ZED PATCH LOG",
+              "==================================================",
+              f"Output File: {OUTPUT_DTB}",
+              f"Internal Model Name: {'m9pro' if 'model = \"m9pro\";' in final_text else 'MISSING'}",
+              "[+] Injected LED/Zed nodes:"
+          ]
+          for name, _ in extracted_nodes:
+              log.append(f"  - {name}: {'OK' if name in final_text else 'MISSING'}")
 
           log_text = "\n".join(log)
           with open("patch_verification.log", "w", encoding="utf-8") as f: f.write(log_text)
           print(log_text)
-          print("[✓] DTB build completed successfully.")
+          print("[✓] Patch completed successfully!")
           EOF
 
-      - name: Upload DTB & Log
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: m9-pro-dtb
+          name: m9pro-patched-dtb
           path: |
-            rk3326-m9-4clones.dtb
+            rk3326-m9pro-linux.dtb.patched
             patch_verification.log
           retention-days: 14
 
@@ -302,6 +187,6 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add rk3326-m9-4clones.dtb patch_verification.log
-          git diff --quiet && git diff --staged --quiet || git commit -m "build(dtb): automated M9 Pro DTB merge [skip ci]"
+          git add rk3326-m9pro-linux.dtb.patched patch_verification.log
+          git diff --quiet && git diff --staged --quiet || git commit -m "fix(dtb): inject joystick rgb led and zed controller nodes into m9pro dtb [skip ci]"
           git push --force origin main

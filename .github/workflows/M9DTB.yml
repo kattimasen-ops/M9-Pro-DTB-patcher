@@ -31,25 +31,22 @@ jobs:
           python3 - << 'EOF'
           import re, subprocess, os
 
-          # Target your working M9 Pro DTB directly as the base
           BASE_DTB = "rk3326-m9pro-linux.dtb"
           DONOR_DTB = "rk3326-k36-linux.dtb"
           OUTPUT_DTB = "rk3326-m9pro-linux.dtb.patched"
 
           if not os.path.exists(BASE_DTB):
-              print(f"[!] Error: Base working DTB '{BASE_DTB}' not found in repo root!")
+              print(f"[!] Error: Base DTB '{BASE_DTB}' not found!")
               exit(1)
 
           if not os.path.exists(DONOR_DTB):
-              print(f"[!] Error: Donor DTB '{DONOR_DTB}' not found in repo root!")
+              print(f"[!] Error: Donor DTB '{DONOR_DTB}' not found!")
               exit(1)
 
-          print(f"[*] Decompiling base ({BASE_DTB}) and donor ({DONOR_DTB})...")
-          subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f", "-o", "base.dts", BASE_DTB], check=True)
-          subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f", "-o", "donor.dts", DONOR_DTB], check=True)
+          # ---- Helper Functions ----
 
-          with open("base.dts", "r", encoding="utf-8") as f: base_dts = f.read()
-          with open("donor.dts", "r", encoding="utf-8") as f: donor_dts = f.read()
+          def decompile(dtb_path, dts_path):
+              subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f", "-o", dts_path, dtb_path], check=True)
 
           def find_node_boundaries(dts_content, node_name):
               pattern = re.compile(r'(?:^[ \t]*|[ \t]+)([a-zA-Z0-9_-]+:\s*)?' + re.escape(node_name) + r'(?:@[a-zA-Z0-9_,+-]+)?\s*\{', re.MULTILINE)
@@ -64,7 +61,7 @@ jobs:
                   elif dts_content[i] == '}': brace_count -= 1
                   if brace_count == 0:
                       end_idx = i + 1
-                      if end_idx < len(dts_content) and end_idx == ';': 
+                      if end_idx < len(dts_content) and dts_content[end_idx] == ';': 
                           end_idx += 1
                       return start_idx, end_idx
               return None, None
@@ -82,8 +79,28 @@ jobs:
                   text = text[:start] + text[end:]
               return text
 
+          def build_phandle_map(dts_content):
+              pmap = {}
+              for match in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', dts_content):
+                  ph_val = match.group(1)
+                  text_before = dts_content[:match.start()]
+                  brace_idx = text_before.rfind('{')
+                  if brace_idx != -1:
+                      node_decl = text_before[:brace_idx].strip().split('\n')[-1].strip()
+                      node_name = node_decl.split(':')[-1].strip().split()[0]
+                      pmap[node_name] = ph_val
+              return pmap
+
+          # ---- Execution Flow ----
+
+          print(f"[*] Decompiling base ({BASE_DTB}) and donor ({DONOR_DTB})...")
+          decompile(BASE_DTB, "base.dts")
+          decompile(DONOR_DTB, "donor.dts")
+
+          with open("base.dts", "r", encoding="utf-8") as f: base_dts = f.read()
+          with open("donor.dts", "r", encoding="utf-8") as f: donor_dts = f.read()
+
           print("[*] Analyzing and extracting joystick RGB LED controller / zed nodes from K36...")
-          # Target specific ArkOS LED / joystick controller strings including zed / zed_gadget / zed_service variants
           target_led_nodes = [
               "play_joystick", "zed", "zed_gadget", "zed_service", 
               "rgb-led", "rgb_led", "joystick_led", "led_ring", 
@@ -96,19 +113,6 @@ jobs:
               if block:
                   extracted_nodes.append((node, block))
                   print(f"[+] Found joystick LED / zed control node in donor DTB: {node}")
-
-          # Build phandle map for safe injection matching
-          def build_phandle_map(dts_content):
-              pmap = {}
-              for match in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', dts_content):
-                  ph_val = match.group(1)
-                  text_before = dts_content[:match.start()]
-                  brace_idx = text_before.rfind('{')
-                  if brace_idx != -1:
-                      node_decl = text_before[:brace_idx].strip().split('\n')[-1].strip()
-                      node_name = node_decl.split(':')[-1].strip().split()[0]
-                      pmap[node_name] = ph_val
-              return pmap
 
           base_map = build_phandle_map(base_dts)
           donor_map = build_phandle_map(donor_dts)
@@ -151,7 +155,8 @@ jobs:
                           "-Wno-unique_unit_address", "-Wno-graph_child_address",
                           "-o", OUTPUT_DTB, "merged.dts"], check=True)
 
-          # Verification output log
+          # Verification check
+          print("[*] Verifying output DTB structure...")
           decompile(OUTPUT_DTB, "verify.dts")
           with open("verify.dts", "r", encoding="utf-8") as f: final_text = f.read()
 

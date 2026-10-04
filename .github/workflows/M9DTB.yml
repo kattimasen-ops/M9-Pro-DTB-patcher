@@ -28,7 +28,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y device-tree-compiler python3
 
-      - name: Patch M9 Pro DTB with Multi-Donor Joystick RGB LED Controls
+      - name: Patch M9 Pro DTB with Multi-Donor Joystick RGB LED Controls and Display Fixes
         run: |
           python3 - << 'EOF'
           import re, subprocess, os
@@ -115,6 +115,52 @@ jobs:
           for node in ["vcc-led", "ledvcc-en-gpio", "play_joystick", "zed", "zed_gadget", "zed_service"]:
               base_dts = purge_node(base_dts, node)
 
+          # ---------------------------------------------------------------
+          # DISPLAY FIXES: DDR/DMC scaling + VOP IOMMU robustness
+          # ---------------------------------------------------------------
+          # 1) auto-freq-en = <0> disables DMC load-based frequency scaling.
+          #    Reference: Rockchip DDR Developer Guide (EN), p.4:
+          #    "The value of 'auto-freq-en' shall be 0 to disable load DDR
+          #     Frequency scaling".
+          # 2) vop-dclk-mode = <1> prevents DCLK adjustment on DDR frequency
+          #    change. Reference: same guide, p.4: "1: vop dclk never divided".
+          # 3) rockchip,disable-device-link-resume on the VOP prevents IOMMU
+          #    page faults that lead to black screens.
+          #    Reference: [PATCH 3/3] arm64: dts: rockchip: Disable device
+          #    link for RK3328 VOP (Jagan Teki, 2023-03-30).
+          # ---------------------------------------------------------------
+          dmc_start, dmc_end = find_node_boundaries(base_dts, "dmc")
+          if dmc_start is not None and dmc_end is not None:
+              dmc_block = base_dts[dmc_start:dmc_end]
+              dmc_block = re.sub(r'\s*auto-freq-en\s*=\s*<[^>]*>;', '', dmc_block)
+              dmc_block = re.sub(r'\s*vop-dclk-mode\s*=\s*<[^>]*>;', '', dmc_block)
+              insert = "\n\t\tauto-freq-en = <0>;\n\t\tvop-dclk-mode = <1>;\n"
+              if dmc_block.rstrip().endswith('};'):
+                  dmc_block = dmc_block.rstrip()[:-2].rstrip() + insert + "\n\t};"
+              elif dmc_block.rstrip().endswith('}'):
+                  dmc_block = dmc_block.rstrip()[:-1].rstrip() + insert + "\n\t}"
+              base_dts = base_dts[:dmc_start] + dmc_block + base_dts[dmc_end:]
+              print("[*] DMC patched: auto-freq-en=0, vop-dclk-mode=1")
+          else:
+              print("[!] Warning: dmc node not found — display fix 1-2 not applied")
+
+          vop_start, vop_end = find_node_boundaries(base_dts, "vop")
+          if vop_start is not None and vop_end is not None:
+              vop_block = base_dts[vop_start:vop_end]
+              vop_block = re.sub(r'\s*rockchip,disable-device-link-resume\s*;', '', vop_block)
+              insert = "\n\t\trockchip,disable-device-link-resume;\n"
+              if vop_block.rstrip().endswith('};'):
+                  vop_block = vop_block.rstrip()[:-2].rstrip() + insert + "\n\t};"
+              elif vop_block.rstrip().endswith('}'):
+                  vop_block = vop_block.rstrip()[:-1].rstrip() + insert + "\n\t}"
+              base_dts = base_dts[:vop_start] + vop_block + base_dts[vop_end:]
+              print("[*] VOP patched: rockchip,disable-device-link-resume")
+          else:
+              print("[!] Warning: vop node not found — display fix 3 not applied")
+
+          # ---------------------------------------------------------------
+          # Original joystick RGB / ZED injection (unchanged)
+          # ---------------------------------------------------------------
           base_map = build_phandle_map(base_dts)
           target_phandles = set(int(m.group(1), 16) for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', base_dts))
           new_ph_counter = max(target_phandles) + 1 if target_phandles else 0x1000
@@ -127,19 +173,19 @@ jobs:
               if not os.path.exists(donor):
                   print(f"[!] Warning: Donor DTB '{donor}' not found in repo. Skipping.")
                   continue
-              
+
               donor_dts_file = f"{donor}.dts"
               print(f"[*] Decompiling Donor DTB: {donor}")
               decompile(donor, donor_dts_file)
-              
+
               with open(donor_dts_file, "r", encoding="utf-8") as f:
                   donor_dts = f.read()
-                  
+
               donor_map = build_phandle_map(donor_dts)
               translation_dict = {d_ph: base_map[name] for name, d_ph in donor_map.items() if name in base_map}
-              
+
               found_nodes = extract_root_nodes_by_keywords(donor_dts, keywords)
-              
+
               internal_ph_map = {}
               for _, block in found_nodes:
                   for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', block):
@@ -180,11 +226,16 @@ jobs:
 
           log = [
               "==================================================",
-              "      M9 PRO JOYSTICK RGB MULTI-DONOR LOG",
+              "      M9 PRO DTB PATCH LOG (JOYSTICK + DISPLAY)",
               "==================================================",
               f"Base File: {BASE_DTB}",
               f"Output File: {OUTPUT_DTB}",
               f"Donors Scanned: {', '.join(DONOR_DTBS)}",
+              "",
+              "[+] Display fixes applied:",
+              f"  - DMC auto-freq-en=0: {'OK' if 'auto-freq-en = <0>' in final_text else 'MISSING'}",
+              f"  - DMC vop-dclk-mode=1: {'OK' if 'vop-dclk-mode = <1>' in final_text else 'MISSING'}",
+              f"  - VOP disable-device-link-resume: {'OK' if 'rockchip,disable-device-link-resume' in final_text else 'MISSING'}",
               "",
               "[+] Injected Joystick RGB / Zed nodes:"
           ]
@@ -212,6 +263,6 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add rk3326-m9pro-linux.dtb.patched patch_verification.log
-          git diff --quiet && git diff --staged --quiet || git commit -m "fix(dtb): patch m9pro dtb with joystick rgb led and zed nodes from all donors [skip ci]"
+          git diff --quiet && git diff --staged --quiet || git commit -m "fix(dtb): add DDR/DMC and VOP IOMMU fixes for RK3326 display stability [skip ci]"
           git pull --rebase origin main || true
           git push origin main

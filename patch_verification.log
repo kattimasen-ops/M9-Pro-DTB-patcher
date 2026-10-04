@@ -1,14 +1,28 @@
 ==================================================
-      M9 PRO DTB PATCH LOG (JOYSTICK + DISPLAY)
+   M9 PRO DTB MASTER PATCH & OVERCLOCK LOG
 ==================================================
-Base File: rk3326-m9pro-linux.dtb
-Output File: rk3326-m9pro-linux.dtb.patched
-Donors Scanned: rg32tw3ka.dtb, rk3326-r36tmax-linux.dtb, rk3326-k36s-linux.dtb, rk3326-k36-linux.dtb
+Base DTB: rk3326-m9pro-linux.dtb
+Output DTB: rk3326-m9pro-linux.dtb.patched
+Donors: rg32tw3ka.dtb, rk3326-r36tmax-linux.dtb, rk3326-k36s-linux.dtb, rk3326-k36-linux.dtb
 
-[+] Display fixes applied:
+[+] Display-Fixes:
   - DMC auto-freq-en=0: MISSING
   - DMC vop-dclk-mode=1: MISSING
   - VOP disable-device-link-resume: OK
 
-[+] Injected Joystick RGB / Zed nodes:
+[+] Injizierte Hardware-Nodes:
   - play_joystick: OK
+  - sdio-pwrseq: OK
+  - wifi-enable-h: OK
+
+[+] Overclocking-Profile:
+  - opp-1300000000: OK
+  - opp-1416000000: OK
+  - opp-1512000000: OK
+  - opp-667000000: OK
+  - opp-700000000: OK
+  - opp-800000000: OK
+  - opp-933000000: OK
+  - opp-1056000000: OK
+
+[+] Verifikation abgeschlossen.

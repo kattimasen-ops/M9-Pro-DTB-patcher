@@ -1,0 +1,393 @@
+name: MASTER - RK3326 DTB Full Patch & Overclock (Self-Healing + Display Fixes)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  master-patch-dtb:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install DTC & Python
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y device-tree-compiler python3
+
+      - name: Execute Full DTS Patcher (Self-Healing + Display Fixes + OC + Verification)
+        run: |
+          python3 - << 'EOF'
+          import re
+          import subprocess
+          import os
+          import sys
+
+          # ============================================================
+          # KONFIGURATION
+          # ============================================================
+          BASE_DTB = "rk3326-m9pro-linux.dtb"
+          DONOR_DTBS = [
+              "rg32tw3ka.dtb",
+              "rk3326-r36tmax-linux.dtb",
+              "rk3326-k36s-linux.dtb",
+              "rk3326-k36-linux.dtb"
+          ]
+          OUTPUT_DTB = "rk3326-m9pro-linux.dtb.patched"
+          VERIFICATION_DTS = "final_verification.dts"
+
+          if not os.path.exists(BASE_DTB):
+              print(f"[!] ERROR: Base DTB '{BASE_DTB}' not found!")
+              sys.exit(1)
+
+          # ============================================================
+          # HILFSFUNKTIONEN
+          # ============================================================
+          def decompile(dtb_path, dts_path):
+              subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f",
+                              "-Wno-unique_unit_address", "-Wno-graph_child_address",
+                              "-Wno-unit_address_format", "-Wno-avoid_unnecessary_addr_size",
+                              "-Wno-i2c_bus_reg", "-Wno-simple_bus_reg",
+                              "-o", dts_path, dtb_path], check=True)
+
+          def find_node_boundaries(dts_content, node_name):
+              pattern = re.compile(r'(?:^[ \t]*|[ \t]+)([a-zA-Z0-9_-]+:\s*)?' + re.escape(node_name) + r'(?:@[a-zA-Z0-9_,+-]+)?\s*\{', re.MULTILINE)
+              match = pattern.search(dts_content)
+              if not match: return None, None
+              start_idx = match.start()
+              brace_idx = dts_content.find('{', start_idx)
+              brace_count = 1
+              for i in range(brace_idx + 1, len(dts_content)):
+                  if dts_content[i] == '{': brace_count += 1
+                  elif dts_content[i] == '}': brace_count -= 1
+                  if brace_count == 0:
+                      end_idx = i + 1
+                      if end_idx < len(dts_content) and dts_content[end_idx] == ';': end_idx += 1
+                      return start_idx, end_idx
+              return None, None
+
+          def purge_node(text, node_name):
+              while True:
+                  start, end = find_node_boundaries(text, node_name)
+                  if start is None: break
+                  text = text[:start] + text[end:]
+              return text
+
+          def build_phandle_map(dts_content):
+              pmap = {}
+              for match in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', dts_content):
+                  ph_val = match.group(1)
+                  text_before = dts_content[:match.start()]
+                  brace_idx = text_before.rfind('{')
+                  if brace_idx != -1:
+                      node_decl = text_before[:brace_idx].strip().split('\n')[-1].strip()
+                      node_name = node_decl.split(':')[-1].strip().split()[0]
+                      pmap[node_name] = ph_val
+              return pmap
+
+          def extract_root_nodes_by_keywords(text, keywords):
+              extracted_blocks = []
+              for match in re.finditer(r'^[ \t]*([a-zA-Z0-9_,+-]+)(?:@[a-zA-Z0-9_,+-]+)?\s*\{', text, re.MULTILINE):
+                  decl = match.group(0)
+                  node_name = match.group(1)
+                  start_idx = match.start()
+                  if any(kw.lower() in decl.lower() for kw in keywords):
+                      brace_count = 1
+                      brace_idx = text.find('{', start_idx)
+                      end_idx = -1
+                      for j in range(brace_idx + 1, len(text)):
+                          if text[j] == '{': brace_count += 1
+                          elif text[j] == '}': brace_count -= 1
+                          if brace_count == 0:
+                              end_idx = j + 1
+                              if end_idx < len(text) and text[end_idx] == ';': end_idx += 1
+                              break
+                      if end_idx != -1:
+                          extracted_blocks.append((node_name, text[start_idx:end_idx].strip()))
+              return extracted_blocks
+
+          def insert_props_at_node_start(node_block, props_lines):
+              open_brace = node_block.find('{')
+              if open_brace == -1:
+                  return node_block
+              indent = "\n\t\t"
+              body = "".join(f"{indent}{line}" for line in props_lines)
+              return node_block[:open_brace + 1] + body + node_block[open_brace + 1:]
+
+          def remove_prop(text, prop_name):
+              pattern = re.compile(r'[ \t]*' + re.escape(prop_name) + r'\s*=\s*<[^>]*>;[ \t]*\n?')
+              text = pattern.sub('', text)
+              pattern_simple = re.compile(r'[ \t]*' + re.escape(prop_name) + r'\s*;[ \t]*\n?')
+              text = pattern_simple.sub('', text)
+              return text
+
+          # ============================================================
+          # SCHRITT 1: BASIS-DTB DEKOMPILIEREN
+          # ============================================================
+          print(f"[*] Decompiling Base DTB: {BASE_DTB}")
+          decompile(BASE_DTB, "base.dts")
+
+          with open("base.dts", "r", encoding="utf-8") as f:
+              base_dts = f.read()
+
+          # ============================================================
+          # SCHRITT 2: SELF-HEALING (Duplikate bereinigen)
+          # ============================================================
+          print("[*] Self-Healing: Bereinige kaputte Duplikate...")
+          base_dts = re.sub(r'\n\t/\* --- INJECTED.*?/\* --- END INJECTED.*?\*/\n',
+                            '', base_dts, flags=re.DOTALL)
+          base_dts = re.sub(r'\n\t/\* --- START INJECTED.*?/\* --- END INJECTED.*?\*/\n',
+                            '', base_dts, flags=re.DOTALL)
+
+          nodes_to_purge = [
+              "vcc-led", "ledvcc-en-gpio", "charge-led-gpio",
+              "wifi-enable-h", "led-vcc", "gpio-leds", "led",
+              "sdio-pwrseq", "play_joystick", "zed", "zed_gadget", "zed_service"
+          ]
+          for node in nodes_to_purge:
+              base_dts = purge_node(base_dts, node)
+
+          # ============================================================
+          # SCHRITT 3: DISPLAY-FIXES (DMC + VOP IOMMU)
+          # ============================================================
+          # 1) auto-freq-en = <0>: Deaktiviert lastbasierte DDR-Frequenzskalierung
+          #    Referenz: Rockchip DDR Developer Guide (EN), S.4:
+          #    "The value of 'auto-freq-en' shall be 0 to disable load DDR
+          #     Frequency scaling"
+          # 2) vop-dclk-mode = <1>: DCLK wird nie geteilt, verhindert
+          #    Bildfehler bei DDR-Frequenzwechsel
+          #    Referenz: gleicher Guide, S.4: "1: vop dclk never divided"
+          # 3) rockchip,disable-device-link-resume auf dem VOP verhindert
+          #    IOMMU-Page-Faults, die zu schwarzen Bildschirmen führen
+          #    Referenz: [PATCH 3/3] arm64: dts: rockchip: Disable device
+          #    link for RK3328 VOP (Jagan Teki, 2023-03-30)
+          # ============================================================
+          print("[*] Wende Display-Fixes an (DMC + VOP IOMMU)...")
+
+          dmc_start, dmc_end = find_node_boundaries(base_dts, "dmc")
+          if dmc_start is not None and dmc_end is not None:
+              dmc_block = base_dts[dmc_start:dmc_end]
+              dmc_block = remove_prop(dmc_block, "auto-freq-en")
+              dmc_block = remove_prop(dmc_block, "vop-dclk-mode")
+              dmc_block = insert_props_at_node_start(
+                  dmc_block,
+                  ["auto-freq-en = <0>;", "vop-dclk-mode = <1>;"]
+              )
+              base_dts = base_dts[:dmc_start] + dmc_block + base_dts[dmc_end:]
+              print("[+] DMC gepatcht: auto-freq-en=0, vop-dclk-mode=1")
+          else:
+              print("[!] Warnung: dmc-Node nicht gefunden — Display-Fix 1-2 nicht angewendet")
+
+          vop_start, vop_end = find_node_boundaries(base_dts, "vop")
+          if vop_start is not None and vop_end is not None:
+              vop_block = base_dts[vop_start:vop_end]
+              vop_block = remove_prop(vop_block, "rockchip,disable-device-link-resume")
+              vop_block = insert_props_at_node_start(
+                  vop_block,
+                  ["rockchip,disable-device-link-resume;"]
+              )
+              base_dts = base_dts[:vop_start] + vop_block + base_dts[vop_end:]
+              print("[+] VOP gepatcht: rockchip,disable-device-link-resume")
+          else:
+              print("[!] Warnung: vop-Node nicht gefunden — Display-Fix 3 nicht angewendet")
+
+          # ============================================================
+          # SCHRITT 4: HARDWARE-INJEKTION AUS DONOR-DTBs
+          # ============================================================
+          print("[*] Baue Phandle-Wörterbuch für Hardware-Übersetzung...")
+          base_map = build_phandle_map(base_dts)
+          target_phandles = set(int(m.group(1), 16)
+                                for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', base_dts))
+          new_ph_counter = max(target_phandles) + 1 if target_phandles else 0x1000
+
+          injected_names = set()
+          injections = "\n\t/* --- INJECTED M9PRO HARDWARE NODES --- */\n"
+          keywords = ["play_joystick", "zed", "zed_gadget", "zed_service",
+                      "rgb", "joystick_led", "led_rgb", "pwm", "light",
+                      "pcie", "pcim", "wlan", "wifi", "sdio", "rk915", "pwrseq"]
+
+          for donor in DONOR_DTBS:
+              if not os.path.exists(donor):
+                  print(f"[!] Warnung: Donor DTB '{donor}' nicht gefunden. Überspringe.")
+                  continue
+
+              donor_dts_file = f"{donor}.dts"
+              print(f"[*] Dekompiliere Donor DTB: {donor}")
+              decompile(donor, donor_dts_file)
+
+              with open(donor_dts_file, "r", encoding="utf-8") as f:
+                  donor_dts = f.read()
+
+              donor_map = build_phandle_map(donor_dts)
+              translation_dict = {d_ph: base_map[name]
+                                  for name, d_ph in donor_map.items() if name in base_map}
+
+              found_nodes = extract_root_nodes_by_keywords(donor_dts, keywords)
+
+              internal_ph_map = {}
+              for _, block in found_nodes:
+                  for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', block):
+                      old_ph = m.group(1).lower()
+                      if old_ph not in internal_ph_map:
+                          internal_ph_map[old_ph] = f"0x{new_ph_counter:x}"
+                          new_ph_counter += 1
+
+              for node_name, block in found_nodes:
+                  clean_name = node_name.split('@')[0]
+                  if "battery" in clean_name.lower() or clean_name.lower() in ["charge-led-gpio"]:
+                      continue
+                  if clean_name in injected_names or find_node_boundaries(base_dts, clean_name)[0] is not None:
+                      # SDIO/PCIe: Status auf "okay" setzen, falls vorhanden
+                      if "sdio" in clean_name.lower() or "pcie" in clean_name.lower():
+                          base_dts = re.sub(
+                              r'(' + re.escape(clean_name) + r'[^}]*status\s*=\s*")disabled(";)',
+                              r'\1okay\2', base_dts)
+                      continue
+
+                  injected_names.add(clean_name)
+                  print(f"[+] Injiziere Node: {clean_name}")
+
+                  for orig_ph, targ_ph in translation_dict.items():
+                      block = re.sub(r'\b' + orig_ph + r'\b', targ_ph, block, flags=re.IGNORECASE)
+                  for old_internal, new_internal in internal_ph_map.items():
+                      block = re.sub(r'\b' + old_internal + r'\b', new_internal, block, flags=re.IGNORECASE)
+
+                  injections += "\t" + block.replace("\n", "\n\t") + "\n\n"
+
+          if injected_names:
+              last_brace = base_dts.rfind("};")
+              if last_brace != -1:
+                  injections += "\t/* --- END INJECTED M9PRO HARDWARE NODES --- */\n"
+                  base_dts = base_dts[:last_brace] + injections + base_dts[last_brace:]
+
+          # ============================================================
+          # SCHRITT 5: OVERCLOCKING (CPU, GPU, DMC)
+          # ============================================================
+          # Referenz: TeacupX OC-Profile für RK3326
+          # CPU: bis 1.512 GHz, GPU: bis 800 MHz, DMC: bis 1.056 GHz
+          # Die Spannungswerte stammen aus dem TeacupX-Profil.
+          # ============================================================
+          print("[*] Wende TeacupX Overclocking-Profile an (CPU, GPU, RAM)...")
+
+          # Entferne bestehende OPP-Nodes, um Duplikate zu vermeiden
+          base_dts = re.sub(r'&(?:cpu0_opp_table|gpu_opp_table|dmc_opp_table)\s*\{[^}]*\};\s*', '', base_dts)
+          base_dts = re.sub(r'\s*opp-(?:1300000000|1416000000|1512000000|667000000|700000000|800000000|933000000|1056000000)\s*\{[^}]*?\};', '', base_dts)
+
+          # CPU-OC: Nach dem bestehenden höchsten OPP einfügen
+          cpu_oc = """
+          		opp-1300000000 { opp-hz = < 0x00 0x4d784000 >; opp-microvolt = < 0x1406f0 >; };
+          		opp-1416000000 { opp-hz = < 0x00 0x5463b000 >; opp-microvolt = < 0x14fb18 >; };
+          		opp-1512000000 { opp-hz = < 0x00 0x5a1f4000 >; opp-microvolt = < 0x155cc0 >; };"""
+          if m := re.search(r'(opp-(?:1200000000|1100000000|1000000000|312000000)\s*\{[^}]*\};)', base_dts):
+              base_dts = base_dts[:m.end()] + "\n" + cpu_oc + base_dts[m.end():]
+              print("[+] CPU-OC: opp-1300000000, opp-1416000000, opp-1512000000")
+
+          # GPU-OC
+          gpu_oc = """
+          		opp-667000000 { opp-hz = < 0x00 0x27c95b00 >; opp-microvolt = < 0x13d620 >; };
+          		opp-700000000 { opp-hz = < 0x00 0x29b92700 >; opp-microvolt = < 0x1406f0 >; };
+          		opp-800000000 { opp-hz = < 0x00 0x2fa0be00 >; opp-microvolt = < 0x14f000 >; };"""
+          if m := re.search(r'(opp-(?:520000000|600000000|400000000|200000000)\s*\{[^}]*\};)', base_dts):
+              base_dts = base_dts[:m.end()] + "\n" + gpu_oc + base_dts[m.end():]
+              print("[+] GPU-OC: opp-667000000, opp-700000000, opp-800000000")
+
+          # DMC-OC
+          dmc_oc = """
+          		opp-933000000 { opp-hz = < 0x00 0x379c29c0 >; };
+          		opp-1056000000 { opp-hz = < 0x00 0x3ef14800 >; };"""
+          if m := re.search(r'(opp-(?:786000000|667000000|528000000|333000000)\s*\{[^}]*\};)', base_dts):
+              base_dts = base_dts[:m.end()] + "\n" + dmc_oc + base_dts[m.end():]
+              print("[+] DMC-OC: opp-933000000, opp-1056000000")
+
+          # ============================================================
+          # SCHRITT 6: DTB KOMPILIEREN
+          # ============================================================
+          with open("merged.dts", "w", encoding="utf-8") as f:
+              f.write(base_dts)
+
+          print(f"[*] Kompiliere finale DTB: {OUTPUT_DTB}")
+          result = subprocess.run(
+              ["dtc", "-I", "dts", "-O", "dtb", "-f",
+               "-Wno-unique_unit_address", "-Wno-graph_child_address",
+               "-Wno-unit_address_format", "-Wno-avoid_unnecessary_addr_size",
+               "-Wno-i2c_bus_reg", "-Wno-simple_bus_reg",
+               "-o", OUTPUT_DTB, "merged.dts"],
+              capture_output=True, text=True)
+          if result.returncode != 0:
+              print("[!] dtc fehlgeschlagen:")
+              print(result.stderr)
+              sys.exit(1)
+          print("[+] dtc erfolgreich.")
+
+          # ============================================================
+          # SCHRITT 7: VERIFIKATION & LOGGING
+          # ============================================================
+          print("[*] Verifiziere finale DTB...")
+          decompile(OUTPUT_DTB, VERIFICATION_DTS)
+          with open(VERIFICATION_DTS, "r", encoding="utf-8") as f:
+              final_text = f.read()
+
+          log_lines = [
+              "==================================================",
+              "   M9 PRO DTB MASTER PATCH & OVERCLOCK LOG",
+              "==================================================",
+              f"Base DTB: {BASE_DTB}",
+              f"Output DTB: {OUTPUT_DTB}",
+              f"Donors: {', '.join(DONOR_DTBS)}",
+              "",
+              "[+] Display-Fixes:",
+              f"  - DMC auto-freq-en=0: {'OK' if 'auto-freq-en = <0>' in final_text else 'MISSING'}",
+              f"  - DMC vop-dclk-mode=1: {'OK' if 'vop-dclk-mode = <1>' in final_text else 'MISSING'}",
+              f"  - VOP disable-device-link-resume: {'OK' if 'rockchip,disable-device-link-resume' in final_text else 'MISSING'}",
+              "",
+              "[+] Injizierte Hardware-Nodes:"
+          ]
+          for name in sorted(injected_names):
+              log_lines.append(f"  - {name}: {'OK' if name in final_text else 'MISSING'}")
+
+          log_lines.append("")
+          log_lines.append("[+] Overclocking-Profile:")
+          oc_profiles = [
+              "opp-1300000000", "opp-1416000000", "opp-1512000000",
+              "opp-667000000", "opp-700000000", "opp-800000000",
+              "opp-933000000", "opp-1056000000"
+          ]
+          for profile in oc_profiles:
+              log_lines.append(f"  - {profile}: {'OK' if profile in final_text else 'MISSING'}")
+
+          log_lines.append("")
+          log_lines.append("[+] Verifikation abgeschlossen.")
+          log_text = "\n".join(log_lines)
+          with open("patch_verification.log", "w", encoding="utf-8") as f:
+              f.write(log_text)
+          print(log_text)
+          EOF
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: m9pro-full-dtb-patch
+          path: |
+            rk3326-m9pro-linux.dtb.patched
+            patch_verification.log
+          retention-days: 14
+
+      - name: Commit and Push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add rk3326-m9pro-linux.dtb.patched patch_verification.log
+          git diff --quiet && git diff --staged --quiet || (git commit -m "fix(dtb): full patch - display fixes + OC + hardware injection [skip ci]" && git push)

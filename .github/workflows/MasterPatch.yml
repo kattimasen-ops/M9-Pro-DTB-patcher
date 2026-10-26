@@ -1,4 +1,4 @@
-name: MASTER - RK3326 DTB Full Patch & Overclock (Self-Healing + Display Fixes + RAM Fixes)
+name: MASTER - RK3326 DTB Full Patch & Overclock (Self-Healing + Display Fixes + Safe RAM Fixes)
 
 on:
   push:
@@ -26,7 +26,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y device-tree-compiler python3
 
-      - name: Execute Full DTS Patcher (RAM + Self-Healing + Display + OC + Verification)
+      - name: Execute Full DTS Patcher (Safe RAM + Self-Healing + Display + OC + Verification)
         run: |
           python3 - << 'EOF'
           import re
@@ -159,33 +159,37 @@ jobs:
               base_dts = purge_node(base_dts, node)
 
           # ============================================================
-          # SCHRITT 3: RAM-FIXES (1 GB Memory + CMA Reduktion)
+          # SCHRITT 3: SICHERE RAM-FIXES
           # ============================================================
-          print("[*] Wende RAM-Fixes an...")
+          print("[*] Prüfe memory-Knoten auf sichere 1GB-Größe...")
           
-          # 1) Memory-Knoten auf 1 GB (0x40000000) setzen
-          memory_pattern = re.compile(
-              r'(memory(?:@[0-9a-fA-F]+)?\s*\{[^}]*?reg\s*=\s*)<[^>]+>(\s*;)',
-              re.DOTALL
-          )
-          new_dts, count = memory_pattern.subn(r'\1<0x0 0x0 0x0 0x40000000>\2', base_dts)
-          if count > 0:
-              base_dts = new_dts
-              print(f"[+] {count} memory-Knoten auf <0x0 0x0 0x0 0x40000000> (1 GiB) gesetzt.")
-          else:
-              print("[!] Warnung: Kein memory-Knoten gefunden. Möglicherweise in einer dtsi-Datei definiert.")
+          # Finde alle memory-Knoten
+          memory_nodes = list(re.finditer(
+              r'(memory(?:@[0-9a-fA-F]+)?\s*\{[^}]*?reg\s*=\s*)<([^>]+)>(\s*;)',
+              base_dts, re.DOTALL
+          ))
 
-          # 2) CMA (Continuous Memory Allocator) auf 64 MB (0x4000000) reduzieren
-          cma_pattern = re.compile(
-              r'(linux,cma\s*\{[^}]*?size\s*=\s*)<[^>]+>',
-              re.DOTALL
-          )
-          new_dts, count = cma_pattern.subn(r'\1<0x0 0x4000000>', base_dts)
-          if count > 0:
-              base_dts = new_dts
-              print(f"[+] {count} linux,cma-Knoten auf 64 MB (0x4000000) gesetzt.")
+          if not memory_nodes:
+              print("[!] Warnung: Kein memory-Knoten gefunden. Die RAM-Größe wird vermutlich durch den Bootloader (DDR-Bin) bestimmt.")
           else:
-              print("[*] Kein expliziter linux,cma-Knoten gefunden (verwende Standard).")
+              for match in reversed(memory_nodes): # Rückwärts iterieren, um String-Indizes nicht zu verschieben
+                  reg_val = match.group(2).strip()
+                  parts = reg_val.split()
+                  if len(parts) >= 1:
+                      try:
+                          size = int(parts[-1], 16)
+                          if size < 0x40000000:
+                              print(f"[+] Patche memory-Knoten: <{reg_val}> -> <0x0 0x0 0x0 0x40000000> (1 GB)")
+                              base_dts = base_dts[:match.start(2)] + "0x0 0x0 0x0 0x40000000" + base_dts[match.end(2):]
+                          else:
+                              print(f"[*] memory-Knoten ist bereits >= 1GB (<{reg_val}>). Keine Änderung nötig.")
+                      except ValueError:
+                          print(f"[!] Konnte Größe nicht parsen: <{reg_val}>. Überspringe.")
+                  else:
+                      print(f"[!] Unerwartetes reg-Format: <{reg_val}>. Überspringe.")
+
+          # Hinweis: Die CMA-Reduktion wurde entfernt, da sie in der Vergangenheit zu schwarzen Bildschirmen führte.
+          # Der Standard-CMA-Wert der Stock-DTB wird beibehalten.
 
           # ============================================================
           # SCHRITT 4: DISPLAY-FIXES (DMC + VOP IOMMU)
@@ -360,8 +364,7 @@ jobs:
               f"Donors: {', '.join(DONOR_DTBS)}",
               "",
               "[+] RAM-Fixes:",
-              f"  - memory-Knoten (1 GB): {'OK' if '0x0 0x0 0x0 0x40000000' in final_text else 'MISSING'}",
-              f"  - linux,cma (64 MB): {'OK' if '0x0 0x4000000' in final_text else 'MISSING'}",
+              f"  - memory-Knoten (1 GB): {'OK' if '0x40000000' in final_text else 'MISSING'}",
               "",
               "[+] Display-Fixes:",
               f"  - DMC auto-freq-en=0: {'OK' if 'auto-freq-en = <0>' in final_text else 'MISSING'}",
@@ -407,4 +410,4 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add rk3326-m9pro-linux.dtb.patched patch_verification.log
-          git diff --quiet && git diff --staged --quiet || (git commit -m "fix(dtb): full patch - RAM fixes + display fixes + OC + hardware injection [skip ci]" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "fix(dtb): full patch - safe RAM fixes + display fixes + OC + hardware injection [skip ci]" && git push)

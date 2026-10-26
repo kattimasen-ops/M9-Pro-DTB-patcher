@@ -21,7 +21,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Wichtig, damit alle Commits für den Rebase verfügbar sind
+          fetch-depth: 0
 
       - name: Install DTC & Python
         run: |
@@ -402,17 +402,25 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add rk3326-m9pro-linux.dtb.patched patch_verification.log
           
-          # Führe Commit nur aus, wenn es Änderungen gibt
-          if ! git diff --quiet && git diff --staged --quiet; then
+          # Prüfen, ob es überhaupt Änderungen gibt
+          if git diff --quiet && git diff --staged --quiet; then
             echo "Keine Änderungen zum Committen."
-          else
-            git commit -m "fix(dtb): full patch - safe RAM fixes + display fixes + OC + hardware injection [skip ci]"
-            
-            # Hole die neuesten Änderungen vom Remote-Server und wende den Commit darauf an
-            git pull --rebase origin main || true
-            
-            # Jetzt pushen
-            git push origin main
+            exit 0
           fi
+
+          # Remote-Stand holen und lokale Historie hart darauf zurücksetzen.
+          # Dadurch werden keine Rebases mehr versucht – der generierte Commit
+          # wird immer auf den aktuellen Remote-HEAD aufgesetzt.
+          git fetch origin main
+          git reset --hard origin/main
+
+          # Generierte Dateien erneut stagen (sie wurden durch das Reset
+          # nicht angetastet, da sie untracked sind bzw. neu erzeugt wurden)
+          git add rk3326-m9pro-linux.dtb.patched patch_verification.log
+
+          # Commit erstellen
+          git commit -m "fix(dtb): full patch - safe RAM fixes + display fixes + OC + hardware injection [skip ci]"
+
+          # Direkt pushen (die Historie ist jetzt linear auf origin/main)
+          git push origin main

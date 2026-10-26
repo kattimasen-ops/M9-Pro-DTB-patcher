@@ -1,4 +1,4 @@
-name: MASTER - RK3326 DTB Full Patch & Overclock (Self-Healing + Display Fixes + Safe RAM Fixes)
+name: M9 Pro DTB - Safe RAM Fix Only
 
 on:
   push:
@@ -13,9 +13,8 @@ permissions:
   contents: write
 
 jobs:
-  master-patch-dtb:
+  fix-ram:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
 
     steps:
       - name: Checkout Repository
@@ -28,7 +27,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y device-tree-compiler python3
 
-      - name: Execute Full DTS Patcher (Safe RAM + Self-Healing + Display + OC + Verification)
+      - name: Patch DTB (RAM Only)
         run: |
           python3 - << 'EOF'
           import re
@@ -36,364 +35,97 @@ jobs:
           import os
           import sys
 
-          # ============================================================
-          # KONFIGURATION
-          # ============================================================
           BASE_DTB = "rk3326-m9pro-linux.dtb"
-          DONOR_DTBS = [
-              "rg32tw3ka.dtb",
-              "rk3326-r36tmax-linux.dtb",
-              "rk3326-k36s-linux.dtb",
-              "rk3326-k36-linux.dtb"
-          ]
           OUTPUT_DTB = "rk3326-m9pro-linux.dtb.patched"
-          VERIFICATION_DTS = "final_verification.dts"
+          VERIFY_DTS = "verify.dts"
 
           if not os.path.exists(BASE_DTB):
-              print(f"[!] ERROR: Base DTB '{BASE_DTB}' not found!")
+              print(f"[!] ERROR: {BASE_DTB} not found!")
               sys.exit(1)
 
-          # ============================================================
-          # HILFSFUNKTIONEN
-          # ============================================================
-          def decompile(dtb_path, dts_path):
-              subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f",
-                              "-Wno-unique_unit_address", "-Wno-graph_child_address",
-                              "-Wno-unit_address_format", "-Wno-avoid_unnecessary_addr_size",
-                              "-Wno-i2c_bus_reg", "-Wno-simple_bus_reg",
-                              "-o", dts_path, dtb_path], check=True)
+          print(f"[*] Decompiling {BASE_DTB}...")
+          subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-o", "base.dts", BASE_DTB], check=True)
 
-          def find_node_boundaries(dts_content, node_name):
-              pattern = re.compile(r'(?:^[ \t]*|[ \t]+)([a-zA-Z0-9_-]+:\s*)?' + re.escape(node_name) + r'(?:@[a-zA-Z0-9_,+-]+)?\s*\{', re.MULTILINE)
-              match = pattern.search(dts_content)
-              if not match: return None, None
-              start_idx = match.start()
-              brace_idx = dts_content.find('{', start_idx)
-              brace_count = 1
-              for i in range(brace_idx + 1, len(dts_content)):
-                  if dts_content[i] == '{': brace_count += 1
-                  elif dts_content[i] == '}': brace_count -= 1
-                  if brace_count == 0:
-                      end_idx = i + 1
-                      if end_idx < len(dts_content) and dts_content[end_idx] == ';': end_idx += 1
-                      return start_idx, end_idx
-              return None, None
+          with open("base.dts", "r") as f:
+              dts = f.read()
 
-          def purge_node(text, node_name):
-              while True:
-                  start, end = find_node_boundaries(text, node_name)
-                  if start is None: break
-                  text = text[:start] + text[end:]
-              return text
-
-          def build_phandle_map(dts_content):
-              pmap = {}
-              for match in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', dts_content):
-                  ph_val = match.group(1)
-                  text_before = dts_content[:match.start()]
-                  brace_idx = text_before.rfind('{')
-                  if brace_idx != -1:
-                      node_decl = text_before[:brace_idx].strip().split('\n')[-1].strip()
-                      node_name = node_decl.split(':')[-1].strip().split()[0]
-                      pmap[node_name] = ph_val
-              return pmap
-
-          def extract_root_nodes_by_keywords(text, keywords):
-              extracted_blocks = []
-              for match in re.finditer(r'^[ \t]*([a-zA-Z0-9_,+-]+)(?:@[a-zA-Z0-9_,+-]+)?\s*\{', text, re.MULTILINE):
-                  decl = match.group(0)
-                  node_name = match.group(1)
-                  start_idx = match.start()
-                  if any(kw.lower() in decl.lower() for kw in keywords):
-                      brace_count = 1
-                      brace_idx = text.find('{', start_idx)
-                      end_idx = -1
-                      for j in range(brace_idx + 1, len(text)):
-                          if text[j] == '{': brace_count += 1
-                          elif text[j] == '}': brace_count -= 1
-                          if brace_count == 0:
-                              end_idx = j + 1
-                              if end_idx < len(text) and text[end_idx] == ';': end_idx += 1
-                              break
-                      if end_idx != -1:
-                          extracted_blocks.append((node_name, text[start_idx:end_idx].strip()))
-              return extracted_blocks
-
-          def insert_props_at_node_start(node_block, props_lines):
-              open_brace = node_block.find('{')
-              if open_brace == -1:
-                  return node_block
-              indent = "\n\t\t"
-              body = "".join(f"{indent}{line}" for line in props_lines)
-              return node_block[:open_brace + 1] + body + node_block[open_brace + 1:]
-
-          def remove_prop(text, prop_name):
-              pattern = re.compile(r'[ \t]*' + re.escape(prop_name) + r'\s*=\s*<[^>]*>;[ \t]*\n?')
-              text = pattern.sub('', text)
-              pattern_simple = re.compile(r'[ \t]*' + re.escape(prop_name) + r'\s*;[ \t]*\n?')
-              text = pattern_simple.sub('', text)
-              return text
-
-          # ============================================================
-          # SCHRITT 1: BASIS-DTB DEKOMPILIEREN
-          # ============================================================
-          print(f"[*] Decompiling Base DTB: {BASE_DTB}")
-          decompile(BASE_DTB, "base.dts")
-
-          with open("base.dts", "r", encoding="utf-8") as f:
-              base_dts = f.read()
-
-          # ============================================================
-          # SCHRITT 2: SELF-HEALING (Duplikate bereinigen)
-          # ============================================================
-          print("[*] Self-Healing: Bereinige kaputte Duplikate...")
-          base_dts = re.sub(r'\n\t/\* --- INJECTED.*?/\* --- END INJECTED.*?\*/\n',
-                            '', base_dts, flags=re.DOTALL)
-          base_dts = re.sub(r'\n\t/\* --- START INJECTED.*?/\* --- END INJECTED.*?\*/\n',
-                            '', base_dts, flags=re.DOTALL)
-
-          nodes_to_purge = [
-              "vcc-led", "ledvcc-en-gpio", "charge-led-gpio",
-              "wifi-enable-h", "led-vcc", "gpio-leds", "led",
-              "sdio-pwrseq", "play_joystick", "zed", "zed_gadget", "zed_service"
-          ]
-          for node in nodes_to_purge:
-              base_dts = purge_node(base_dts, node)
-
-          # ============================================================
-          # SCHRITT 3: SICHERE RAM-FIXES
-          # ============================================================
-          print("[*] Prüfe memory-Knoten auf sichere 1GB-Größe...")
+          # ==========================================
+          # 1. FIX: Memory Node (Ensure 1GB)
+          # ==========================================
+          print("[*] Checking memory node...")
+          memory_pattern = re.compile(r'(memory(?:@[0-9a-fA-F]+)?\s*\{[^}]*?reg\s*=\s*)<([^>]+)>(\s*;)', re.DOTALL)
           
-          memory_nodes = list(re.finditer(
-              r'(memory(?:@[0-9a-fA-F]+)?\s*\{[^}]*?reg\s*=\s*)<([^>]+)>(\s*;)',
-              base_dts, re.DOTALL
-          ))
+          def fix_memory(match):
+              reg_val = match.group(2).strip()
+              parts = reg_val.split()
+              if parts:
+                  try:
+                      size = int(parts[-1], 16)
+                      if size < 0x40000000:
+                          print(f"    -> Found smaller RAM size ({hex(size)}). Patching to 1GB (0x40000000).")
+                          return f"{match.group(1)}<0x0 0x0 0x0 0x40000000>{match.group(3)}"
+                      else:
+                          print(f"    -> RAM size is already {hex(size)}. No change needed.")
+                  except ValueError:
+                      pass
+              return match.group(0)
 
-          if not memory_nodes:
-              print("[!] Warnung: Kein memory-Knoten gefunden. Die RAM-Größe wird vermutlich durch den Bootloader (DDR-Bin) bestimmt.")
-          else:
-              for match in reversed(memory_nodes):
-                  reg_val = match.group(2).strip()
-                  parts = reg_val.split()
-                  if len(parts) >= 1:
-                      try:
-                          size = int(parts[-1], 16)
-                          if size < 0x40000000:
-                              print(f"[+] Patche memory-Knoten: <{reg_val}> -> <0x0 0x0 0x0 0x40000000> (1 GB)")
-                              base_dts = base_dts[:match.start(2)] + "0x0 0x0 0x0 0x40000000" + base_dts[match.end(2):]
-                          else:
-                              print(f"[*] memory-Knoten ist bereits >= 1GB (<{reg_val}>). Keine Änderung nötig.")
-                      except ValueError:
-                          print(f"[!] Konnte Größe nicht parsen: <{reg_val}>. Überspringe.")
-                  else:
-                      print(f"[!] Unerwartetes reg-Format: <{reg_val}>. Überspringe.")
+          dts = memory_pattern.sub(fix_memory, dts)
 
-          # ============================================================
-          # SCHRITT 4: DISPLAY-FIXES (DMC + VOP IOMMU)
-          # ============================================================
-          print("[*] Wende Display-Fixes an (DMC + VOP IOMMU)...")
+          # ==========================================
+          # 2. FIX: CMA (Continuous Memory Allocator)
+          # ==========================================
+          # The GPU often reserves a huge CMA pool. Reduce to 64MB to free usable RAM.
+          print("[*] Checking linux,cma reserved memory...")
+          cma_pattern = re.compile(r'(linux,cma\s*\{[^}]*?size\s*=\s*)<([^>]+)>', re.DOTALL)
+          
+          def fix_cma(match):
+              size_val = match.group(2).strip()
+              parts = size_val.split()
+              if parts:
+                  try:
+                      size = int(parts[-1], 16)
+                      if size > 0x4000000: # If larger than 64MB
+                          print(f"    -> Found large CMA pool ({hex(size)}). Reducing to 64MB (0x4000000).")
+                          return f"{match.group(1)}<0x0 0x4000000>"
+                      else:
+                          print(f"    -> CMA size is already small enough ({hex(size)}). No change needed.")
+                  except ValueError:
+                      pass
+              return match.group(0)
 
-          dmc_start, dmc_end = find_node_boundaries(base_dts, "dmc")
-          if dmc_start is not None and dmc_end is not None:
-              dmc_block = base_dts[dmc_start:dmc_end]
-              dmc_block = remove_prop(dmc_block, "auto-freq-en")
-              dmc_block = remove_prop(dmc_block, "vop-dclk-mode")
-              dmc_block = insert_props_at_node_start(
-                  dmc_block,
-                  ["auto-freq-en = <0>;", "vop-dclk-mode = <1>;"]
-              )
-              base_dts = base_dts[:dmc_start] + dmc_block + base_dts[dmc_end:]
-              print("[+] DMC gepatcht: auto-freq-en=0, vop-dclk-mode=1")
-          else:
-              print("[!] Warnung: dmc-Node nicht gefunden — Display-Fix 1-2 nicht angewendet")
+          dts = cma_pattern.sub(fix_cma, dts)
 
-          vop_start, vop_end = find_node_boundaries(base_dts, "vop")
-          if vop_start is not None and vop_end is not None:
-              vop_block = base_dts[vop_start:vop_end]
-              vop_block = remove_prop(vop_block, "rockchip,disable-device-link-resume")
-              vop_block = insert_props_at_node_start(
-                  vop_block,
-                  ["rockchip,disable-device-link-resume;"]
-              )
-              base_dts = base_dts[:vop_start] + vop_block + base_dts[vop_end:]
-              print("[+] VOP gepatcht: rockchip,disable-device-link-resume")
-          else:
-              print("[!] Warnung: vop-Node nicht gefunden — Display-Fix 3 nicht angewendet")
+          # ==========================================
+          # COMPILE & LOG
+          # ==========================================
+          with open("patched.dts", "w") as f:
+              f.write(dts)
 
-          # ============================================================
-          # SCHRITT 5: HARDWARE-INJEKTION AUS DONOR-DTBs
-          # ============================================================
-          print("[*] Baue Phandle-Wörterbuch für Hardware-Übersetzung...")
-          base_map = build_phandle_map(base_dts)
-          target_phandles = set(int(m.group(1), 16)
-                                for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', base_dts))
-          new_ph_counter = max(target_phandles) + 1 if target_phandles else 0x1000
-
-          injected_names = set()
-          injections = "\n\t/* --- INJECTED M9PRO HARDWARE NODES --- */\n"
-          keywords = ["play_joystick", "zed", "zed_gadget", "zed_service",
-                      "rgb", "joystick_led", "led_rgb", "pwm", "light",
-                      "pcie", "pcim", "wlan", "wifi", "sdio", "rk915", "pwrseq"]
-
-          for donor in DONOR_DTBS:
-              if not os.path.exists(donor):
-                  print(f"[!] Warnung: Donor DTB '{donor}' nicht gefunden. Überspringe.")
-                  continue
-
-              donor_dts_file = f"{donor}.dts"
-              print(f"[*] Dekompiliere Donor DTB: {donor}")
-              decompile(donor, donor_dts_file)
-
-              with open(donor_dts_file, "r", encoding="utf-8") as f:
-                  donor_dts = f.read()
-
-              donor_map = build_phandle_map(donor_dts)
-              translation_dict = {d_ph: base_map[name]
-                                  for name, d_ph in donor_map.items() if name in base_map}
-
-              found_nodes = extract_root_nodes_by_keywords(donor_dts, keywords)
-
-              internal_ph_map = {}
-              for _, block in found_nodes:
-                  for m in re.finditer(r'(?:linux,phandle|phandle)\s*=\s*<(0x[0-9a-fA-F]+)>;', block):
-                      old_ph = m.group(1).lower()
-                      if old_ph not in internal_ph_map:
-                          internal_ph_map[old_ph] = f"0x{new_ph_counter:x}"
-                          new_ph_counter += 1
-
-              for node_name, block in found_nodes:
-                  clean_name = node_name.split('@')[0]
-                  if "battery" in clean_name.lower() or clean_name.lower() in ["charge-led-gpio"]:
-                      continue
-                  if clean_name in injected_names or find_node_boundaries(base_dts, clean_name)[0] is not None:
-                      if "sdio" in clean_name.lower() or "pcie" in clean_name.lower():
-                          base_dts = re.sub(
-                              r'(' + re.escape(clean_name) + r'[^}]*status\s*=\s*")disabled(";)',
-                              r'\1okay\2', base_dts)
-                      continue
-
-                  injected_names.add(clean_name)
-                  print(f"[+] Injiziere Node: {clean_name}")
-
-                  for orig_ph, targ_ph in translation_dict.items():
-                      block = re.sub(r'\b' + orig_ph + r'\b', targ_ph, block, flags=re.IGNORECASE)
-                  for old_internal, new_internal in internal_ph_map.items():
-                      block = re.sub(r'\b' + old_internal + r'\b', new_internal, block, flags=re.IGNORECASE)
-
-                  injections += "\t" + block.replace("\n", "\n\t") + "\n\n"
-
-          if injected_names:
-              last_brace = base_dts.rfind("};")
-              if last_brace != -1:
-                  injections += "\t/* --- END INJECTED M9PRO HARDWARE NODES --- */\n"
-                  base_dts = base_dts[:last_brace] + injections + base_dts[last_brace:]
-
-          # ============================================================
-          # SCHRITT 6: OVERCLOCKING (CPU, GPU, DMC)
-          # ============================================================
-          print("[*] Wende TeacupX Overclocking-Profile an (CPU, GPU, RAM)...")
-
-          base_dts = re.sub(r'&(?:cpu0_opp_table|gpu_opp_table|dmc_opp_table)\s*\{[^}]*\};\s*', '', base_dts)
-          base_dts = re.sub(r'\s*opp-(?:1300000000|1416000000|1512000000|667000000|700000000|800000000|933000000|1056000000)\s*\{[^}]*?\};', '', base_dts)
-
-          cpu_oc = """
-          		opp-1300000000 { opp-hz = < 0x00 0x4d784000 >; opp-microvolt = < 0x1406f0 >; };
-          		opp-1416000000 { opp-hz = < 0x00 0x5463b000 >; opp-microvolt = < 0x14fb18 >; };
-          		opp-1512000000 { opp-hz = < 0x00 0x5a1f4000 >; opp-microvolt = < 0x155cc0 >; };"""
-          if m := re.search(r'(opp-(?:1200000000|1100000000|1000000000|312000000)\s*\{[^}]*\};)', base_dts):
-              base_dts = base_dts[:m.end()] + "\n" + cpu_oc + base_dts[m.end():]
-              print("[+] CPU-OC: opp-1300000000, opp-1416000000, opp-1512000000")
-
-          gpu_oc = """
-          		opp-667000000 { opp-hz = < 0x00 0x27c95b00 >; opp-microvolt = < 0x13d620 >; };
-          		opp-700000000 { opp-hz = < 0x00 0x29b92700 >; opp-microvolt = < 0x1406f0 >; };
-          		opp-800000000 { opp-hz = < 0x00 0x2fa0be00 >; opp-microvolt = < 0x14f000 >; };"""
-          if m := re.search(r'(opp-(?:520000000|600000000|400000000|200000000)\s*\{[^}]*\};)', base_dts):
-              base_dts = base_dts[:m.end()] + "\n" + gpu_oc + base_dts[m.end():]
-              print("[+] GPU-OC: opp-667000000, opp-700000000, opp-800000000")
-
-          dmc_oc = """
-          		opp-933000000 { opp-hz = < 0x00 0x379c29c0 >; };
-          		opp-1056000000 { opp-hz = < 0x00 0x3ef14800 >; };"""
-          if m := re.search(r'(opp-(?:786000000|667000000|528000000|333000000)\s*\{[^}]*\};)', base_dts):
-              base_dts = base_dts[:m.end()] + "\n" + dmc_oc + base_dts[m.end():]
-              print("[+] DMC-OC: opp-933000000, opp-1056000000")
-
-          # ============================================================
-          # SCHRITT 7: DTB KOMPILIEREN
-          # ============================================================
-          with open("merged.dts", "w", encoding="utf-8") as f:
-              f.write(base_dts)
-
-          print(f"[*] Kompiliere finale DTB: {OUTPUT_DTB}")
-          result = subprocess.run(
-              ["dtc", "-I", "dts", "-O", "dtb", "-f",
-               "-Wno-unique_unit_address", "-Wno-graph_child_address",
-               "-Wno-unit_address_format", "-Wno-avoid_unnecessary_addr_size",
-               "-Wno-i2c_bus_reg", "-Wno-simple_bus_reg",
-               "-o", OUTPUT_DTB, "merged.dts"],
-              capture_output=True, text=True)
-          if result.returncode != 0:
-              print("[!] dtc fehlgeschlagen:")
-              print(result.stderr)
-              sys.exit(1)
-          print("[+] dtc erfolgreich.")
-
-          # ============================================================
-          # SCHRITT 8: VERIFIKATION & LOGGING
-          # ============================================================
-          print("[*] Verifiziere finale DTB...")
-          decompile(OUTPUT_DTB, VERIFICATION_DTS)
-          with open(VERIFICATION_DTS, "r", encoding="utf-8") as f:
-              final_text = f.read()
-
-          log_lines = [
-              "==================================================",
-              "   M9 PRO DTB MASTER PATCH & OVERCLOCK LOG",
-              "==================================================",
-              f"Base DTB: {BASE_DTB}",
-              f"Output DTB: {OUTPUT_DTB}",
-              f"Donors: {', '.join(DONOR_DTBS)}",
-              "",
-              "[+] RAM-Fixes:",
-              f"  - memory-Knoten (1 GB): {'OK' if '0x40000000' in final_text else 'MISSING'}",
-              "",
-              "[+] Display-Fixes:",
-              f"  - DMC auto-freq-en=0: {'OK' if 'auto-freq-en = <0>' in final_text else 'MISSING'}",
-              f"  - DMC vop-dclk-mode=1: {'OK' if 'vop-dclk-mode = <1>' in final_text else 'MISSING'}",
-              f"  - VOP disable-device-link-resume: {'OK' if 'rockchip,disable-device-link-resume' in final_text else 'MISSING'}",
-              "",
-              "[+] Injizierte Hardware-Nodes:"
-          ]
-          for name in sorted(injected_names):
-              log_lines.append(f"  - {name}: {'OK' if name in final_text else 'MISSING'}")
-
-          log_lines.append("")
-          log_lines.append("[+] Overclocking-Profile:")
-          oc_profiles = [
-              "opp-1300000000", "opp-1416000000", "opp-1512000000",
-              "opp-667000000", "opp-700000000", "opp-800000000",
-              "opp-933000000", "opp-1056000000"
-          ]
-          for profile in oc_profiles:
-              log_lines.append(f"  - {profile}: {'OK' if profile in final_text else 'MISSING'}")
-
-          log_lines.append("")
-          log_lines.append("[+] Verifikation abgeschlossen.")
-          log_text = "\n".join(log_lines)
-          with open("patch_verification.log", "w", encoding="utf-8") as f:
-              f.write(log_text)
-          print(log_text)
+          print(f"[*] Compiling {OUTPUT_DTB}...")
+          subprocess.run(["dtc", "-I", "dts", "-O", "dtb", "-o", OUTPUT_DTB, "patched.dts"], check=True)
+          
+          print("[+] Success! DTB patched.")
+          
+          subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-o", VERIFY_DTS, OUTPUT_DTB], check=True)
+          with open(VERIFY_DTS, "r") as f:
+              verify_text = f.read()
+              
+          with open("ram_fix_log.txt", "w") as f:
+              f.write("M9 PRO RAM FIX LOG\n")
+              f.write("==================\n")
+              f.write(f"Memory Node (1GB): {'OK' if '0x0 0x0 0x0 0x40000000' in verify_text else 'CHECK DTS'}\n")
+              f.write(f"CMA Node (64MB):   {'OK' if '0x0 0x4000000' in verify_text else 'CHECK DTS'}\n")
+              
           EOF
 
-      - name: Upload Artifacts
+      - name: Upload Patched DTB
         uses: actions/upload-artifact@v4
         with:
-          name: m9pro-full-dtb-patch
+          name: m9pro-ram-fixed-dtb
           path: |
             rk3326-m9pro-linux.dtb.patched
-            patch_verification.log
+            ram_fix_log.txt
           retention-days: 14
 
       - name: Commit and Push
@@ -403,24 +135,19 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Prüfen, ob es überhaupt Änderungen gibt
           if git diff --quiet && git diff --staged --quiet; then
-            echo "Keine Änderungen zum Committen."
+            echo "No changes to commit."
             exit 0
           fi
 
-          # Remote-Stand holen und lokale Historie hart darauf zurücksetzen.
-          # Dadurch werden keine Rebases mehr versucht – der generierte Commit
-          # wird immer auf den aktuellen Remote-HEAD aufgesetzt.
+          # 1. Server-Stand abrufen
           git fetch origin main
+          # 2. Lokale Historie hart auf Server-Stand setzen (verhindert Rebase-Konflikte)
           git reset --hard origin/main
 
-          # Generierte Dateien erneut stagen (sie wurden durch das Reset
-          # nicht angetastet, da sie untracked sind bzw. neu erzeugt wurden)
-          git add rk3326-m9pro-linux.dtb.patched patch_verification.log
-
-          # Commit erstellen
-          git commit -m "fix(dtb): full patch - safe RAM fixes + display fixes + OC + hardware injection [skip ci]"
-
-          # Direkt pushen (die Historie ist jetzt linear auf origin/main)
+          # 3. Generierte Dateien stagen und committen
+          git add rk3326-m9pro-linux.dtb.patched ram_fix_log.txt
+          git commit -m "fix(dtb): safe RAM and CMA adjustment to unlock full 1GB [skip ci]"
+          
+          # 4. Pushen
           git push origin main

@@ -1,28 +1,22 @@
 ==================================================
-   M9 PRO DTB MASTER PATCH & OVERCLOCK LOG
+      M9 PRO DTB PATCH & OVERCLOCK VERIFICATION   
 ==================================================
-Base DTB: rk3326-m9pro-linux.dtb
-Output DTB: rk3326-m9pro-linux.dtb.patched
-Donors: rg32tw3ka.dtb, rk3326-r36tmax-linux.dtb, rk3326-k36s-linux.dtb, rk3326-k36-linux.dtb
+Target File: rk3326-k36-linux.dtb
 
-[+] Display-Fixes:
-  - DMC auto-freq-en=0: MISSING
-  - DMC vop-dclk-mode=1: MISSING
-  - VOP disable-device-link-resume: OK
+[+] Überprüfung der injizierten Hardware-Knoten:
+  - Node 'led': BESTÄTIGT (Gefunden)
+  - Node 'led-vcc': BESTÄTIGT (Gefunden)
+  - Node 'sdio-pwrseq': BESTÄTIGT (Gefunden)
+  - Node 'vcc-led': BESTÄTIGT (Gefunden)
 
-[+] Injizierte Hardware-Nodes:
-  - play_joystick: OK
-  - sdio-pwrseq: OK
-  - wifi-enable-h: OK
+[+] Überprüfung der TeacupX Overclocking-Profile:
+  - Profile 'opp-1300000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-1416000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-1512000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-667000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-700000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-800000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-933000000': ANGEWENDET (Aktiv)
+  - Profile 'opp-1056000000': ANGEWENDET (Aktiv)
 
-[+] Overclocking-Profile:
-  - opp-1300000000: OK
-  - opp-1416000000: OK
-  - opp-1512000000: OK
-  - opp-667000000: OK
-  - opp-700000000: OK
-  - opp-800000000: OK
-  - opp-933000000: OK
-  - opp-1056000000: OK
-
-[+] Verifikation abgeschlossen.
+[✓] Gegencheck erfolgreich abgeschlossen. Keine Duplikate oder Kollisionen.

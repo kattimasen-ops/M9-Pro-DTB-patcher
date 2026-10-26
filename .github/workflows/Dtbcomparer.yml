@@ -1,10 +1,10 @@
-name: DTB RAM Analysis (Stock vs ArkOS vs K36S)
+name: DTB RAM Analysis (All Files)
 
 on:
   workflow_dispatch:
 
 jobs:
-  analyze-dtb:
+  analyze-all-dtbs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -15,23 +15,31 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y device-tree-compiler
 
-      - name: Decompile and Compare DTB Memory Sections
+      - name: Decompile and Compare All DTBs
         run: |
           python3 - << 'EOF'
           import subprocess
           import re
           import os
 
+          # Liste der Dateien basierend auf deinem Repository-Bild
           FILES_TO_CHECK = [
-              "rg32tw3ka.dtb",              # Stock EmuELEC (Goldstandard)
-              "rk3326-m9pro-linux.dtb",     # Aktuelle ArkOS Basis
-              "k36s-working.dtb"            # K36S Referenz (falls vorhanden)
+              "rg32tw3ka.dtb",                # Stock EmuELEC
+              "rk3326-k36-linux.dtb",         # K36
+              "rk3326-k36s-linux.dtb",        # K36S
+              "rk3326-m9pro-linux.dtb",       # Aktuelle ArkOS DTB
+              "rk3326-r36tmax-linux.dtb"      # R36TMax
           ]
           
-          OUTPUT_LOG = "dtb_ram_comparison.txt"
+          OUTPUT_LOG = "all_dtb_comparison.txt"
           log = "==================================================\n"
-          log += "   DTB RAM COMPARISON (Stock vs ArkOS vs K36S)\n"
+          log += "   DTB FULL RAM ANALYSIS (All Devices)\n"
           log += "==================================================\n\n"
+
+          def clean_block(block):
+              """Entfernt übermäßige Leerzeilen und Tabs für bessere Lesbarkeit"""
+              lines = [line.strip() for line in block.split('\n') if line.strip()]
+              return '\n    '.join(lines)
 
           def analyze_file(dtb_name):
               res_log = f"--- Analyzing {dtb_name} ---\n"
@@ -39,54 +47,48 @@ jobs:
                   return res_log + "[!] File not found. Skipped.\n\n"
               
               dts_name = dtb_name + ".dts"
-              subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-o", dts_name, dtb_name], 
-                             capture_output=True, check=True)
-              
+              try:
+                  subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-o", dts_name, dtb_name], 
+                                 capture_output=True, check=True)
+              except subprocess.CalledProcessError:
+                  return res_log + "[!] Failed to decompile. Invalid DTB?\n\n"
+
               with open(dts_name, "r") as f:
                   text = f.read()
               
-              # 1. Memory Node finden
-              mem_matches = re.findall(r'(memory(?:@[0-9a-fA-F]+)?\s*\{[^}]*?reg\s*=\s*<[^>]+>[^}]*?\};)', text, re.DOTALL)
-              if mem_matches:
-                  res_log += "[+] Memory Node(s):\n"
-                  for m in mem_matches:
-                      # Bereinige den String für die Ausgabe (Whitespace reduzieren)
-                      clean_m = " ".join(m.split())
-                      res_log += f"    {clean_m}\n"
+              # 1. Memory Node
+              mem_match = re.search(r'(memory\s*\{.*?\n\t\};)', text, re.DOTALL)
+              if mem_match:
+                  res_log += "[+] Memory Node:\n    " + clean_block(mem_match.group(1)) + "\n\n"
               else:
-                  res_log += "[!] No 'memory' node found.\n"
+                  res_log += "[!] No 'memory' node found.\n\n"
 
-              # 2. Reserved Memory finden
-              res_matches = re.findall(r'(reserved-memory\s*\{.*?\n\t\};)', text, re.DOTALL)
-              if res_matches:
-                  res_log += "\n[+] Reserved Memory Sizes:\n"
-                  for r in res_matches:
-                      # Suche nach Sub-Nodes mit size-Eigenschaft
-                      sizes = re.findall(r'([a-zA-Z0-9,_-]+)\s*\{[^}]*?size\s*=\s*<([^>]+)>', r, re.DOTALL)
-                      for name, size in sizes:
-                          clean_size = " ".join(size.split())
-                          res_log += f"    - {name}: size = <{clean_size}>\n"
-                  
-                  # Suche nach globalen Einträgen wie linux,cma
-                  cma = re.search(r'linux,cma\s*\{[^}]*?size\s*=\s*<([^>]+)>', text, re.DOTALL)
-                  if cma:
-                      clean_cma = " ".join(cma.group(1).split())
-                      res_log += f"    - linux,cma (global): size = <{clean_cma}>\n"
+              # 2. Reserved Memory
+              res_match = re.search(r'(reserved-memory\s*\{.*?\n\t\};)', text, re.DOTALL)
+              if res_match:
+                  res_log += "[+] Reserved Memory:\n    " + clean_block(res_match.group(1)) + "\n\n"
               else:
-                  res_log += "[!] No 'reserved-memory' block found.\n"
+                  res_log += "[!] No 'reserved-memory' block found.\n\n"
 
-              return res_log + "\n"
+              # 3. Chosen Node (Bootargs)
+              chosen_match = re.search(r'(chosen\s*\{.*?\n\t\};)', text, re.DOTALL)
+              if chosen_match:
+                  res_log += "[+] Chosen Node (Bootargs):\n    " + clean_block(chosen_match.group(1)) + "\n\n"
+              else:
+                  res_log += "[!] No 'chosen' node found.\n\n"
+
+              return res_log
 
           for file in FILES_TO_CHECK:
               log += analyze_file(file)
 
           with open(OUTPUT_LOG, "w") as f:
               f.write(log)
-          print(log)
+          print(f"[*] Analysis complete. Log size: {len(log)} bytes.")
           EOF
 
       - name: Upload Comparison Log
         uses: actions/upload-artifact@v4
         with:
-          name: dtb-ram-comparison
-          path: dtb_ram_comparison.txt
+          name: all-dtb-comparison-log
+          path: all_dtb_comparison.txt

@@ -1,4 +1,4 @@
-name: MASTER - RK3326 DTB Full Patch & Overclock (Self-Healing + Display Fixes)
+name: MASTER - RK3326 DTB Full Patch & Overclock (Self-Healing + Display Fixes + RAM Fixes)
 
 on:
   push:
@@ -26,7 +26,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y device-tree-compiler python3
 
-      - name: Execute Full DTS Patcher (Self-Healing + Display Fixes + OC + Verification)
+      - name: Execute Full DTS Patcher (RAM + Self-Healing + Display + OC + Verification)
         run: |
           python3 - << 'EOF'
           import re
@@ -159,19 +159,36 @@ jobs:
               base_dts = purge_node(base_dts, node)
 
           # ============================================================
-          # SCHRITT 3: DISPLAY-FIXES (DMC + VOP IOMMU)
+          # SCHRITT 3: RAM-FIXES (1 GB Memory + CMA Reduktion)
           # ============================================================
-          # 1) auto-freq-en = <0>: Deaktiviert lastbasierte DDR-Frequenzskalierung
-          #    Referenz: Rockchip DDR Developer Guide (EN), S.4:
-          #    "The value of 'auto-freq-en' shall be 0 to disable load DDR
-          #     Frequency scaling"
-          # 2) vop-dclk-mode = <1>: DCLK wird nie geteilt, verhindert
-          #    Bildfehler bei DDR-Frequenzwechsel
-          #    Referenz: gleicher Guide, S.4: "1: vop dclk never divided"
-          # 3) rockchip,disable-device-link-resume auf dem VOP verhindert
-          #    IOMMU-Page-Faults, die zu schwarzen Bildschirmen führen
-          #    Referenz: [PATCH 3/3] arm64: dts: rockchip: Disable device
-          #    link for RK3328 VOP (Jagan Teki, 2023-03-30)
+          print("[*] Wende RAM-Fixes an...")
+          
+          # 1) Memory-Knoten auf 1 GB (0x40000000) setzen
+          memory_pattern = re.compile(
+              r'(memory(?:@[0-9a-fA-F]+)?\s*\{[^}]*?reg\s*=\s*)<[^>]+>(\s*;)',
+              re.DOTALL
+          )
+          new_dts, count = memory_pattern.subn(r'\1<0x0 0x0 0x0 0x40000000>\2', base_dts)
+          if count > 0:
+              base_dts = new_dts
+              print(f"[+] {count} memory-Knoten auf <0x0 0x0 0x0 0x40000000> (1 GiB) gesetzt.")
+          else:
+              print("[!] Warnung: Kein memory-Knoten gefunden. Möglicherweise in einer dtsi-Datei definiert.")
+
+          # 2) CMA (Continuous Memory Allocator) auf 64 MB (0x4000000) reduzieren
+          cma_pattern = re.compile(
+              r'(linux,cma\s*\{[^}]*?size\s*=\s*)<[^>]+>',
+              re.DOTALL
+          )
+          new_dts, count = cma_pattern.subn(r'\1<0x0 0x4000000>', base_dts)
+          if count > 0:
+              base_dts = new_dts
+              print(f"[+] {count} linux,cma-Knoten auf 64 MB (0x4000000) gesetzt.")
+          else:
+              print("[*] Kein expliziter linux,cma-Knoten gefunden (verwende Standard).")
+
+          # ============================================================
+          # SCHRITT 4: DISPLAY-FIXES (DMC + VOP IOMMU)
           # ============================================================
           print("[*] Wende Display-Fixes an (DMC + VOP IOMMU)...")
 
@@ -203,7 +220,7 @@ jobs:
               print("[!] Warnung: vop-Node nicht gefunden — Display-Fix 3 nicht angewendet")
 
           # ============================================================
-          # SCHRITT 4: HARDWARE-INJEKTION AUS DONOR-DTBs
+          # SCHRITT 5: HARDWARE-INJEKTION AUS DONOR-DTBs
           # ============================================================
           print("[*] Baue Phandle-Wörterbuch für Hardware-Übersetzung...")
           base_map = build_phandle_map(base_dts)
@@ -272,11 +289,7 @@ jobs:
                   base_dts = base_dts[:last_brace] + injections + base_dts[last_brace:]
 
           # ============================================================
-          # SCHRITT 5: OVERCLOCKING (CPU, GPU, DMC)
-          # ============================================================
-          # Referenz: TeacupX OC-Profile für RK3326
-          # CPU: bis 1.512 GHz, GPU: bis 800 MHz, DMC: bis 1.056 GHz
-          # Die Spannungswerte stammen aus dem TeacupX-Profil.
+          # SCHRITT 6: OVERCLOCKING (CPU, GPU, DMC)
           # ============================================================
           print("[*] Wende TeacupX Overclocking-Profile an (CPU, GPU, RAM)...")
 
@@ -311,7 +324,7 @@ jobs:
               print("[+] DMC-OC: opp-933000000, opp-1056000000")
 
           # ============================================================
-          # SCHRITT 6: DTB KOMPILIEREN
+          # SCHRITT 7: DTB KOMPILIEREN
           # ============================================================
           with open("merged.dts", "w", encoding="utf-8") as f:
               f.write(base_dts)
@@ -331,7 +344,7 @@ jobs:
           print("[+] dtc erfolgreich.")
 
           # ============================================================
-          # SCHRITT 7: VERIFIKATION & LOGGING
+          # SCHRITT 8: VERIFIKATION & LOGGING
           # ============================================================
           print("[*] Verifiziere finale DTB...")
           decompile(OUTPUT_DTB, VERIFICATION_DTS)
@@ -345,6 +358,10 @@ jobs:
               f"Base DTB: {BASE_DTB}",
               f"Output DTB: {OUTPUT_DTB}",
               f"Donors: {', '.join(DONOR_DTBS)}",
+              "",
+              "[+] RAM-Fixes:",
+              f"  - memory-Knoten (1 GB): {'OK' if '0x0 0x0 0x0 0x40000000' in final_text else 'MISSING'}",
+              f"  - linux,cma (64 MB): {'OK' if '0x0 0x4000000' in final_text else 'MISSING'}",
               "",
               "[+] Display-Fixes:",
               f"  - DMC auto-freq-en=0: {'OK' if 'auto-freq-en = <0>' in final_text else 'MISSING'}",
@@ -390,4 +407,4 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add rk3326-m9pro-linux.dtb.patched patch_verification.log
-          git diff --quiet && git diff --staged --quiet || (git commit -m "fix(dtb): full patch - display fixes + OC + hardware injection [skip ci]" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "fix(dtb): full patch - RAM fixes + display fixes + OC + hardware injection [skip ci]" && git push)

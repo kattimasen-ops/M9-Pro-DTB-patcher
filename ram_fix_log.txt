@@ -1,0 +1,4 @@
+M9 PRO RAM FIX LOG
+==================
+Memory Node (1GB): CHECK DTS
+CMA Node (64MB):   CHECK DTS

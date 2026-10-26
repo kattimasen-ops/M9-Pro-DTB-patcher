@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Wichtig, damit alle Commits für den Rebase verfügbar sind
 
       - name: Install DTC & Python
         run: |
@@ -163,7 +165,6 @@ jobs:
           # ============================================================
           print("[*] Prüfe memory-Knoten auf sichere 1GB-Größe...")
           
-          # Finde alle memory-Knoten
           memory_nodes = list(re.finditer(
               r'(memory(?:@[0-9a-fA-F]+)?\s*\{[^}]*?reg\s*=\s*)<([^>]+)>(\s*;)',
               base_dts, re.DOTALL
@@ -172,7 +173,7 @@ jobs:
           if not memory_nodes:
               print("[!] Warnung: Kein memory-Knoten gefunden. Die RAM-Größe wird vermutlich durch den Bootloader (DDR-Bin) bestimmt.")
           else:
-              for match in reversed(memory_nodes): # Rückwärts iterieren, um String-Indizes nicht zu verschieben
+              for match in reversed(memory_nodes):
                   reg_val = match.group(2).strip()
                   parts = reg_val.split()
                   if len(parts) >= 1:
@@ -187,9 +188,6 @@ jobs:
                           print(f"[!] Konnte Größe nicht parsen: <{reg_val}>. Überspringe.")
                   else:
                       print(f"[!] Unerwartetes reg-Format: <{reg_val}>. Überspringe.")
-
-          # Hinweis: Die CMA-Reduktion wurde entfernt, da sie in der Vergangenheit zu schwarzen Bildschirmen führte.
-          # Der Standard-CMA-Wert der Stock-DTB wird beibehalten.
 
           # ============================================================
           # SCHRITT 4: DISPLAY-FIXES (DMC + VOP IOMMU)
@@ -269,7 +267,6 @@ jobs:
                   if "battery" in clean_name.lower() or clean_name.lower() in ["charge-led-gpio"]:
                       continue
                   if clean_name in injected_names or find_node_boundaries(base_dts, clean_name)[0] is not None:
-                      # SDIO/PCIe: Status auf "okay" setzen, falls vorhanden
                       if "sdio" in clean_name.lower() or "pcie" in clean_name.lower():
                           base_dts = re.sub(
                               r'(' + re.escape(clean_name) + r'[^}]*status\s*=\s*")disabled(";)',
@@ -297,11 +294,9 @@ jobs:
           # ============================================================
           print("[*] Wende TeacupX Overclocking-Profile an (CPU, GPU, RAM)...")
 
-          # Entferne bestehende OPP-Nodes, um Duplikate zu vermeiden
           base_dts = re.sub(r'&(?:cpu0_opp_table|gpu_opp_table|dmc_opp_table)\s*\{[^}]*\};\s*', '', base_dts)
           base_dts = re.sub(r'\s*opp-(?:1300000000|1416000000|1512000000|667000000|700000000|800000000|933000000|1056000000)\s*\{[^}]*?\};', '', base_dts)
 
-          # CPU-OC: Nach dem bestehenden höchsten OPP einfügen
           cpu_oc = """
           		opp-1300000000 { opp-hz = < 0x00 0x4d784000 >; opp-microvolt = < 0x1406f0 >; };
           		opp-1416000000 { opp-hz = < 0x00 0x5463b000 >; opp-microvolt = < 0x14fb18 >; };
@@ -310,7 +305,6 @@ jobs:
               base_dts = base_dts[:m.end()] + "\n" + cpu_oc + base_dts[m.end():]
               print("[+] CPU-OC: opp-1300000000, opp-1416000000, opp-1512000000")
 
-          # GPU-OC
           gpu_oc = """
           		opp-667000000 { opp-hz = < 0x00 0x27c95b00 >; opp-microvolt = < 0x13d620 >; };
           		opp-700000000 { opp-hz = < 0x00 0x29b92700 >; opp-microvolt = < 0x1406f0 >; };
@@ -319,7 +313,6 @@ jobs:
               base_dts = base_dts[:m.end()] + "\n" + gpu_oc + base_dts[m.end():]
               print("[+] GPU-OC: opp-667000000, opp-700000000, opp-800000000")
 
-          # DMC-OC
           dmc_oc = """
           		opp-933000000 { opp-hz = < 0x00 0x379c29c0 >; };
           		opp-1056000000 { opp-hz = < 0x00 0x3ef14800 >; };"""
@@ -410,4 +403,16 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add rk3326-m9pro-linux.dtb.patched patch_verification.log
-          git diff --quiet && git diff --staged --quiet || (git commit -m "fix(dtb): full patch - safe RAM fixes + display fixes + OC + hardware injection [skip ci]" && git push)
+          
+          # Führe Commit nur aus, wenn es Änderungen gibt
+          if ! git diff --quiet && git diff --staged --quiet; then
+            echo "Keine Änderungen zum Committen."
+          else
+            git commit -m "fix(dtb): full patch - safe RAM fixes + display fixes + OC + hardware injection [skip ci]"
+            
+            # Hole die neuesten Änderungen vom Remote-Server und wende den Commit darauf an
+            git pull --rebase origin main || true
+            
+            # Jetzt pushen
+            git push origin main
+          fi

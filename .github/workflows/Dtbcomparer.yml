@@ -64,9 +64,7 @@ jobs:
               with open(dts_name, "r") as f:
                   text = f.read()
 
-              # ============================================
-              # ORIGINAL-FUNKTIONEN (unverändert)
-              # ============================================
+              # ORIGINAL
               mem_match = re.search(r'(memory\s*\{.*?\n\t\};)', text, re.DOTALL)
               if mem_match:
                   res_log += "[+] Memory Node:\n    " + clean_block(mem_match.group(1)) + "\n\n"
@@ -85,17 +83,15 @@ jobs:
               else:
                   res_log += "[!] No 'chosen' node found.\n\n"
 
-              # ============================================
-              # RAM-SPEZIFISCHE ANALYSE (erweitert)
-              # ============================================
+              # RAM-ANALYSE
               info = {'mem_size': None, 'has_1gb': False, 'has_512mb': False,
                       'ddr_timing': False, 'cma_size': None, 'dmc_found': False}
 
               res_log += "=== RAM-SPEZIFISCHE ANALYSE ===\n"
 
-              # [1] Memory-Node Größen
+              # [1] FIX: non-capturing group (?:@...)
               res_log += "\n[1] Memory-Node(s) mit Größenauswertung:\n"
-              mem_node_blocks = re.findall(r'(memory(@[0-9a-fA-F]+)?\s*\{[^}]*\};)', text, re.DOTALL)
+              mem_node_blocks = re.findall(r'(memory(?:@[0-9a-fA-F]+)?\s*\{[^}]*\};)', text, re.DOTALL)
               if mem_node_blocks:
                   for block in mem_node_blocks:
                       reg_match = re.search(r'reg\s*=\s*<([^>]+)>', block, re.DOTALL)
@@ -112,8 +108,8 @@ jobs:
               else:
                   res_log += "    [!] Keine memory-Nodes.\n"
 
-              # [2] DMC-Knoten (Dynamic Memory Controller) - NEU
-              res_log += "\n[2] DMC-Knoten (Dynamic Memory Controller):\n"
+              # [2] DMC
+              res_log += "\n[2] DMC-Knoten:\n"
               dmc_matches = re.findall(r'(dmc\s*\{[^}]*\};)', text, re.DOTALL)
               if dmc_matches:
                   info['dmc_found'] = True
@@ -123,16 +119,16 @@ jobs:
               else:
                   res_log += "    [!] Kein 'dmc'-Knoten gefunden.\n"
 
-              # [3] rockchip,* Timing-Parameter - NEU
-              res_log += "\n[3] rockchip,* DDR-Timing-Parameter (alle):\n"
+              # [3] rockchip,* Parameter
+              res_log += "\n[3] rockchip,* DDR-Timing-Parameter:\n"
               params = re.findall(r'(rockchip,(?:ddr3|lpddr3|lpddr4|phy_ddr3|phy_lpddr3|phy_lpddr4|dram|pd_idle|sr_idle|sr_mc_gate_idle|srpd_lite_idle|standby_idle|auto_pd_dis_freq|ddr3_speed_bin)[a-zA-Z0-9_]*)\s*=\s*([^;]+);', text)
               if params:
                   for name, val in params:
                       res_log += f"    -> {name} = {val.strip()}\n"
               else:
-                  res_log += "    [!] Keine rockchip,* Timing-Parameter gefunden.\n"
+                  res_log += "    [!] Keine.\n"
 
-              # [4] dmc_opp_table & dram-timing-* - NEU
+              # [4] dmc_opp_table
               res_log += "\n[4] DMC OPP Table & dram-timing-*:\n"
               opp_match = re.search(r'(dmc_opp_table\s*\{.*?\n\t\};)', text, re.DOTALL)
               if opp_match:
@@ -141,11 +137,10 @@ jobs:
                   res_log += "    [!] Keine dmc_opp_table.\n"
               for attr in ['dram-timing-row', 'dram-timing-data', 'dram-timing-names']:
                   matches = re.findall(rf'({attr}\s*=\s*[^;]+;)', text)
-                  if matches:
-                      for m in matches:
-                          res_log += f"    -> {m.strip()}\n"
+                  for m in matches:
+                      res_log += f"    -> {m.strip()}\n"
 
-              # [5] ddr_timing-Knoten (falls vorhanden)
+              # [5] ddr_timing
               res_log += "\n[5] 'ddr_timing'-Knoten:\n"
               ddr_match = re.search(r'(ddr_timing\s*\{[^}]*\};)', text, re.DOTALL)
               if ddr_match:
@@ -154,7 +149,7 @@ jobs:
               else:
                   res_log += "    [!] Kein 'ddr_timing'.\n"
 
-              # [6] DDR-related compatible Strings
+              # [6] DDR compatible
               res_log += "\n[6] DDR-related compatible Strings:\n"
               ddr_compat = re.findall(r'compatible\s*=\s*"([^"]*ddr[^"]*)"', text, re.IGNORECASE)
               for c in sorted(set(ddr_compat)):
@@ -162,7 +157,7 @@ jobs:
               if not ddr_compat:
                   res_log += "    [!] Keine.\n"
 
-              # [7] CMA-Größen
+              # [7] CMA
               res_log += "\n[7] CMA Größen:\n"
               cma_matches = re.findall(r'(linux,cma\s*\{[^}]*size\s*=\s*<([^>]+)>[^}]*\};)', text, re.DOTALL)
               if cma_matches:
@@ -177,7 +172,7 @@ jobs:
               else:
                   res_log += "    [!] Kein CMA.\n"
 
-              # [8] Suche 0x40000000 / 0x20000000
+              # [8] 0x40000000
               res_log += "\n[8] Suche '0x40000000' (1 GiB):\n"
               if "0x40000000" in text.lower():
                   info['has_1gb'] = True
@@ -186,6 +181,7 @@ jobs:
                           res_log += f"    Z{i+1}: {line.strip()}\n"
               else: res_log += "    [!] Nicht gefunden.\n"
 
+              # [9] 0x20000000
               res_log += "\n[9] Suche '0x20000000' (512 MiB):\n"
               if "0x20000000" in text.lower():
                   info['has_512mb'] = True
@@ -194,7 +190,7 @@ jobs:
                           res_log += f"    Z{i+1}: {line.strip()}\n"
               else: res_log += "    [!] Nicht gefunden.\n"
 
-              # [10] Alle reg-Properties >= 256 MiB
+              # [10] große reg
               res_log += "\n[10] 'reg'-Properties >= 256 MiB:\n"
               found = False
               for reg_str in re.findall(r'reg\s*=\s*<([^>]+)>', text):
@@ -211,13 +207,11 @@ jobs:
               res_log += "\n=== ENDE RAM-ANALYSE ===\n\n"
               return res_log, info
 
-          # Ausführung
           for file in FILES_TO_CHECK:
               result, info = analyze_file(file)
               log += result
               if info is not None: summary[file] = info
 
-          # Zusammenfassung
           log += "\n\n==================================================\n"
           log += "   ZUSAMMENFASSUNG: RAM-KONFIGURATION\n"
           log += "==================================================\n\n"

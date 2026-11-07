@@ -18,69 +18,214 @@ jobs:
       - name: Decompile and Compare All DTBs
         run: |
           python3 - << 'EOF'
-          import subprocess
-          import re
-          import os
+          import subprocess, re, os
 
-          # Liste der Dateien basierend auf deinem Repository-Bild
           FILES_TO_CHECK = [
-              "rg32tw3ka.dtb",                # Stock EmuELEC
-              "rk3326-k36-linux.dtb",         # K36
-              "rk3326-k36s-linux.dtb",        # K36S
-              "rk3326-m9pro-linux.dtb",       # Aktuelle ArkOS DTB
-              "rk3326-r36tmax-linux.dtb"      # R36TMax
+              "rg32tw3ka.dtb",
+              "rk3326-k36-linux.dtb",
+              "rk3326-k36s-linux.dtb",
+              "rk3326-m9pro-linux.dtb",
+              "rk3326-r36tmax-linux.dtb",
+              "rf3536k4ka.dtb"
           ]
-          
+
           OUTPUT_LOG = "all_dtb_comparison.txt"
           log = "==================================================\n"
           log += "   DTB FULL RAM ANALYSIS (All Devices)\n"
           log += "==================================================\n\n"
 
+          summary = {}
+
           def clean_block(block):
-              """Entfernt übermäßige Leerzeilen und Tabs für bessere Lesbarkeit"""
               lines = [line.strip() for line in block.split('\n') if line.strip()]
               return '\n    '.join(lines)
+
+          def hex_to_human(val):
+              try:
+                  n = int(val, 16) if isinstance(val, str) else val
+                  if n >= 1024**3: return f"{n / 1024**3:.2f} GiB"
+                  if n >= 1024**2: return f"{n / 1024**2:.2f} MiB"
+                  if n >= 1024: return f"{n / 1024:.2f} KiB"
+                  return f"{n} B"
+              except (ValueError, TypeError): return "?"
 
           def analyze_file(dtb_name):
               res_log = f"--- Analyzing {dtb_name} ---\n"
               if not os.path.exists(dtb_name):
-                  return res_log + "[!] File not found. Skipped.\n\n"
-              
+                  return res_log + "[!] File not found. Skipped.\n\n", None
+
               dts_name = dtb_name + ".dts"
               try:
-                  subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-o", dts_name, dtb_name], 
+                  subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-o", dts_name, dtb_name],
                                  capture_output=True, check=True)
               except subprocess.CalledProcessError:
-                  return res_log + "[!] Failed to decompile. Invalid DTB?\n\n"
+                  return res_log + "[!] Failed to decompile.\n\n", None
 
               with open(dts_name, "r") as f:
                   text = f.read()
-              
-              # 1. Memory Node
+
+              # ============================================
+              # ORIGINAL-FUNKTIONEN (unverändert)
+              # ============================================
               mem_match = re.search(r'(memory\s*\{.*?\n\t\};)', text, re.DOTALL)
               if mem_match:
                   res_log += "[+] Memory Node:\n    " + clean_block(mem_match.group(1)) + "\n\n"
               else:
                   res_log += "[!] No 'memory' node found.\n\n"
 
-              # 2. Reserved Memory
               res_match = re.search(r'(reserved-memory\s*\{.*?\n\t\};)', text, re.DOTALL)
               if res_match:
                   res_log += "[+] Reserved Memory:\n    " + clean_block(res_match.group(1)) + "\n\n"
               else:
                   res_log += "[!] No 'reserved-memory' block found.\n\n"
 
-              # 3. Chosen Node (Bootargs)
               chosen_match = re.search(r'(chosen\s*\{.*?\n\t\};)', text, re.DOTALL)
               if chosen_match:
                   res_log += "[+] Chosen Node (Bootargs):\n    " + clean_block(chosen_match.group(1)) + "\n\n"
               else:
                   res_log += "[!] No 'chosen' node found.\n\n"
 
-              return res_log
+              # ============================================
+              # RAM-SPEZIFISCHE ANALYSE (erweitert)
+              # ============================================
+              info = {'mem_size': None, 'has_1gb': False, 'has_512mb': False,
+                      'ddr_timing': False, 'cma_size': None, 'dmc_found': False}
 
+              res_log += "=== RAM-SPEZIFISCHE ANALYSE ===\n"
+
+              # [1] Memory-Node Größen
+              res_log += "\n[1] Memory-Node(s) mit Größenauswertung:\n"
+              mem_node_blocks = re.findall(r'(memory(@[0-9a-fA-F]+)?\s*\{[^}]*\};)', text, re.DOTALL)
+              if mem_node_blocks:
+                  for block in mem_node_blocks:
+                      reg_match = re.search(r'reg\s*=\s*<([^>]+)>', block, re.DOTALL)
+                      if reg_match:
+                          parts = reg_match.group(1).strip().split()
+                          if len(parts) >= 2:
+                              try:
+                                  size = int(parts[-1], 16)
+                                  res_log += f"    -> reg=<{reg_match.group(1).strip()}> => {hex(size)} ({hex_to_human(size)})\n"
+                                  if info['mem_size'] is None or size > info['mem_size']:
+                                      info['mem_size'] = size
+                              except ValueError: pass
+                  res_log += "    Erster Block:\n    " + clean_block(mem_node_blocks[0]) + "\n"
+              else:
+                  res_log += "    [!] Keine memory-Nodes.\n"
+
+              # [2] DMC-Knoten (Dynamic Memory Controller) - NEU
+              res_log += "\n[2] DMC-Knoten (Dynamic Memory Controller):\n"
+              dmc_matches = re.findall(r'(dmc\s*\{[^}]*\};)', text, re.DOTALL)
+              if dmc_matches:
+                  info['dmc_found'] = True
+                  res_log += "    [GEFUNDEN]\n"
+                  for dmc in dmc_matches:
+                      res_log += "    " + clean_block(dmc) + "\n"
+              else:
+                  res_log += "    [!] Kein 'dmc'-Knoten gefunden.\n"
+
+              # [3] rockchip,* Timing-Parameter - NEU
+              res_log += "\n[3] rockchip,* DDR-Timing-Parameter (alle):\n"
+              params = re.findall(r'(rockchip,(?:ddr3|lpddr3|lpddr4|phy_ddr3|phy_lpddr3|phy_lpddr4|dram|pd_idle|sr_idle|sr_mc_gate_idle|srpd_lite_idle|standby_idle|auto_pd_dis_freq|ddr3_speed_bin)[a-zA-Z0-9_]*)\s*=\s*([^;]+);', text)
+              if params:
+                  for name, val in params:
+                      res_log += f"    -> {name} = {val.strip()}\n"
+              else:
+                  res_log += "    [!] Keine rockchip,* Timing-Parameter gefunden.\n"
+
+              # [4] dmc_opp_table & dram-timing-* - NEU
+              res_log += "\n[4] DMC OPP Table & dram-timing-*:\n"
+              opp_match = re.search(r'(dmc_opp_table\s*\{.*?\n\t\};)', text, re.DOTALL)
+              if opp_match:
+                  res_log += "    [GEFUNDEN]\n    " + clean_block(opp_match.group(1)) + "\n"
+              else:
+                  res_log += "    [!] Keine dmc_opp_table.\n"
+              for attr in ['dram-timing-row', 'dram-timing-data', 'dram-timing-names']:
+                  matches = re.findall(rf'({attr}\s*=\s*[^;]+;)', text)
+                  if matches:
+                      for m in matches:
+                          res_log += f"    -> {m.strip()}\n"
+
+              # [5] ddr_timing-Knoten (falls vorhanden)
+              res_log += "\n[5] 'ddr_timing'-Knoten:\n"
+              ddr_match = re.search(r'(ddr_timing\s*\{[^}]*\};)', text, re.DOTALL)
+              if ddr_match:
+                  info['ddr_timing'] = True
+                  res_log += "    [GEFUNDEN]\n    " + clean_block(ddr_match.group(1)) + "\n"
+              else:
+                  res_log += "    [!] Kein 'ddr_timing'.\n"
+
+              # [6] DDR-related compatible Strings
+              res_log += "\n[6] DDR-related compatible Strings:\n"
+              ddr_compat = re.findall(r'compatible\s*=\s*"([^"]*ddr[^"]*)"', text, re.IGNORECASE)
+              for c in sorted(set(ddr_compat)):
+                  res_log += f"    -> \"{c}\"\n"
+              if not ddr_compat:
+                  res_log += "    [!] Keine.\n"
+
+              # [7] CMA-Größen
+              res_log += "\n[7] CMA Größen:\n"
+              cma_matches = re.findall(r'(linux,cma\s*\{[^}]*size\s*=\s*<([^>]+)>[^}]*\};)', text, re.DOTALL)
+              if cma_matches:
+                  for node_full, size_str in cma_matches:
+                      parts = size_str.strip().split()
+                      if parts:
+                          try:
+                              size = int(parts[-1], 16)
+                              res_log += f"    -> size=<{size_str.strip()}> = {hex(size)} ({hex_to_human(size)})\n"
+                              info['cma_size'] = size
+                          except ValueError: pass
+              else:
+                  res_log += "    [!] Kein CMA.\n"
+
+              # [8] Suche 0x40000000 / 0x20000000
+              res_log += "\n[8] Suche '0x40000000' (1 GiB):\n"
+              if "0x40000000" in text.lower():
+                  info['has_1gb'] = True
+                  for i, line in enumerate(text.split('\n')):
+                      if "0x40000000" in line.lower():
+                          res_log += f"    Z{i+1}: {line.strip()}\n"
+              else: res_log += "    [!] Nicht gefunden.\n"
+
+              res_log += "\n[9] Suche '0x20000000' (512 MiB):\n"
+              if "0x20000000" in text.lower():
+                  info['has_512mb'] = True
+                  for i, line in enumerate(text.split('\n')):
+                      if "0x20000000" in line.lower():
+                          res_log += f"    Z{i+1}: {line.strip()}\n"
+              else: res_log += "    [!] Nicht gefunden.\n"
+
+              # [10] Alle reg-Properties >= 256 MiB
+              res_log += "\n[10] 'reg'-Properties >= 256 MiB:\n"
+              found = False
+              for reg_str in re.findall(r'reg\s*=\s*<([^>]+)>', text):
+                  parts = reg_str.strip().split()
+                  if len(parts) >= 2:
+                      try:
+                          size = int(parts[-1], 16)
+                          if size >= 0x10000000:
+                              res_log += f"    -> <{reg_str.strip()}> = {hex_to_human(size)}\n"
+                              found = True
+                      except ValueError: pass
+              if not found: res_log += "    [!] Keine.\n"
+
+              res_log += "\n=== ENDE RAM-ANALYSE ===\n\n"
+              return res_log, info
+
+          # Ausführung
           for file in FILES_TO_CHECK:
-              log += analyze_file(file)
+              result, info = analyze_file(file)
+              log += result
+              if info is not None: summary[file] = info
+
+          # Zusammenfassung
+          log += "\n\n==================================================\n"
+          log += "   ZUSAMMENFASSUNG: RAM-KONFIGURATION\n"
+          log += "==================================================\n\n"
+          log += f"{'Datei':<30} | {'Memory':<12} | {'1GiB':<6} | {'512MiB':<7} | {'DDR-T':<6} | {'DMC':<4} | {'CMA':<10}\n"
+          log += "-" * 100 + "\n"
+          for fname, inf in summary.items():
+              mem = hex_to_human(inf['mem_size']) if inf['mem_size'] else "?"
+              log += f"{fname:<30} | {mem:<12} | {'JA' if inf['has_1gb'] else 'NEIN':<6} | {'JA' if inf['has_512mb'] else 'NEIN':<7} | {'JA' if inf['ddr_timing'] else 'NEIN':<6} | {'JA' if inf['dmc_found'] else 'NEIN':<4} | {hex_to_human(inf['cma_size']) if inf['cma_size'] else '?':<10}\n"
 
           with open(OUTPUT_LOG, "w") as f:
               f.write(log)
